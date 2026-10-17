@@ -515,6 +515,7 @@ fn no_row_cuts_text_with_an_ellipsis() {
             node: Some(&long_cwd),
             branch: Some("feature/x-a38d-fixed-height-mux-rows"),
             ctx: Some("ctx 48% of 1.0M"),
+            observers: 0,
         };
         let e = crate::pane_border::edges(
             &fields,

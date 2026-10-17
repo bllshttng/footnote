@@ -151,6 +151,10 @@ enum Role {
     /// one pane, masked, to admitted viewers on its own loopback listener. Needs
     /// a TTY: the driver admits viewers and approves steers by typing.
     MuxShare(fno::share::ShareArgs),
+    /// `mux serve --observe --pane <id> [--name <label>]`: watch one masked
+    /// pane read-only in this terminal (run over `ssh -t`); the driver sees the
+    /// watcher on the pane border and the sideline.
+    MuxObserve(fno::observe::ObserveArgs),
     /// `mux serve --snapshot ...`: compose one frame (a staged demo fleet, or
     /// a live server through the observer attach) and write it as
     /// html, svg or png. Carries the serve tail; `client::snapshot::parse`
@@ -214,6 +218,13 @@ enum Role {
     /// door. The tail passes through byte-verbatim, --help included: the
     /// findings door prints the usage.
     ReviewClassify(Vec<OsString>),
+    /// `fno do review invocations <tail>`: the invocations leaf (parse,
+    /// join, reserve, emit, settle), exec'd through the sibling fno-agents
+    /// door. The tail passes through byte-verbatim, help included.
+    ReviewInvocations(Vec<OsString>),
+    /// `fno do review --help` (and the alias's): the native usage, printed
+    /// here because no Python leg remains to list the four leaves.
+    ReviewHelp,
     /// `fno do review <tail>` with no leaf: the assurance root, exec'd
     /// through the sibling fno-agents `review-policy assess` door. The
     /// leaves keep their role: invocations stays Python
@@ -408,6 +419,34 @@ fn parse_share_args(rest: &[OsString]) -> Option<fno::share::ShareArgs> {
     share.then_some(args)
 }
 
+/// Parse `serve --observe` flags into [`fno::observe::ObserveArgs`]. `--pane`
+/// is required and numeric with no default (fail closed); a missing value, an
+/// unknown flag or a bad number is `None`, which the caller maps to usage.
+fn parse_observe_args(rest: &[OsString]) -> Option<fno::observe::ObserveArgs> {
+    let mut observe = false;
+    let mut pane = None;
+    let mut args = fno::observe::ObserveArgs {
+        session: proto::DEFAULT_SESSION.to_string(),
+        pane: 0,
+        name: None,
+    };
+    let mut it = rest.iter();
+    while let Some(a) = it.next() {
+        match a.to_str()? {
+            "--observe" => observe = true,
+            "--pane" => pane = Some(it.next()?.to_str()?.parse().ok()?),
+            "--name" => args.name = Some(it.next()?.to_str()?.to_string()),
+            tok @ ("--server" | "--session") => {
+                mux_cli::note_server_flag(tok);
+                args.session = it.next()?.to_str()?.to_string()
+            }
+            _ => return None,
+        }
+    }
+    args.pane = pane?;
+    observe.then_some(args)
+}
+
 /// The mail reader's lexical claim, in the shape of `agents_history::classify`:
 /// `show` is native (it runs `fno-agents chats show`, the store's one owner)
 /// and `view` is refused by name, because the rename ships no compat shell.
@@ -540,12 +579,26 @@ fn classify_review_classify(args: &[OsString]) -> Option<Vec<OsString>> {
     Some(args[3..].to_vec())
 }
 
+/// `fno do review invocations <tail>`: the invocations leaf, claimed by the
+/// same literal three-token prefix as its siblings. The Python leaf is gone,
+/// so the tail (help included) rides to the door's usage.
+fn classify_review_invocations(args: &[OsString]) -> Option<Vec<OsString>> {
+    if args.len() < 3
+        || args[0].to_str()? != "do"
+        || args[1].to_str()? != "review"
+        || args[2].to_str()? != "invocations"
+    {
+        return None;
+    }
+    Some(args[3..].to_vec())
+}
+
 /// `fno do review <tail>` and the root alias `fno review <tail>`: the
-/// assurance root claims native when the tail names no leaf and no help
-/// request. Only the FIRST tail token names a leaf (a leaf spelled later is
-/// a flag value, exactly as typer reads it); --help/-h anywhere forwards so
-/// typer keeps rendering the leaf listing.
-fn classify_review_root(args: &[OsString]) -> Option<(bool, Vec<OsString>)> {
+/// assurance root claims native when the tail names no leaf. Only the FIRST
+/// tail token names a leaf (a leaf spelled later is a flag value, exactly as
+/// typer reads it); --help/-h anywhere claims the native usage, because no
+/// Python leg remains to render the leaf listing.
+fn classify_review_root(args: &[OsString]) -> Option<(bool, bool, Vec<OsString>)> {
     if args.is_empty() {
         return None;
     }
@@ -561,13 +614,10 @@ fn classify_review_root(args: &[OsString]) -> Option<(bool, Vec<OsString>)> {
     ) {
         return None;
     }
-    if tail
+    let help = tail
         .iter()
-        .any(|a| matches!(a.to_str(), Some("--help") | Some("-h")))
-    {
-        return None;
-    }
-    Some((alias, tail.to_vec()))
+        .any(|a| matches!(a.to_str(), Some("--help") | Some("-h")));
+    Some((alias, help, tail.to_vec()))
 }
 
 fn classify_mail_show(args: &[OsString]) -> Option<Role> {
@@ -683,7 +733,13 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
     if let Some(rest) = classify_review_classify(args) {
         return Role::ReviewClassify(rest);
     }
-    if let Some((alias, rest)) = classify_review_root(args) {
+    if let Some(rest) = classify_review_invocations(args) {
+        return Role::ReviewInvocations(rest);
+    }
+    if let Some((alias, help, rest)) = classify_review_root(args) {
+        if help {
+            return Role::ReviewHelp;
+        }
         return if alias {
             Role::ReviewPolicyAlias(rest)
         } else {
@@ -844,6 +900,15 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
                     Some(s) => Role::MuxShare(s),
                     None => Role::MuxUsage(
                         "fno mux serve --share: needs --pane <id>; optional --steer, --tunnel, --managed, --port <n>, --server <name>"
+                            .into(),
+                    ),
+                }
+            }
+            cli_args::MuxCmd::Serve(t) if t.tail.iter().any(|a| a == "--observe") => {
+                match parse_observe_args(&t.tail) {
+                    Some(o) => Role::MuxObserve(o),
+                    None => Role::MuxUsage(
+                        "fno mux serve --observe: needs --pane <id>; optional --name <label>, --server <name>"
                             .into(),
                     ),
                 }
@@ -1116,6 +1181,23 @@ fn main() {
             &["review-level", "findings", "classify"],
             &rest,
         )),
+        Role::ReviewInvocations(rest) => std::process::exit(fno_agents_exec(
+            "fno do review invocations",
+            &["review-level", "invocations"],
+            &rest,
+        )),
+        Role::ReviewHelp => {
+            println!(
+                "usage: fno do review [--assess-assurance] [--policy-size S] [--risk-surface X]"
+            );
+            println!();
+            println!("leaves:");
+            println!("  resolve-level [<level>]           the sizing leaf");
+            println!("  post-dispositions <args>          the per-round disposition comment");
+            println!("  classify <args>                   the findings classifier");
+            println!("  invocations <action>              parse, join, reserve, emit, settle");
+            std::process::exit(0)
+        }
         Role::ReviewPolicyAssess(rest) => std::process::exit(fno_agents_exec(
             "fno do review",
             &["review-policy", "assess"],
@@ -1175,6 +1257,7 @@ fn main() {
             exit_mux(fno::web::serve(web_args))
         }
         Role::MuxShare(share_args) => exit_mux(fno::share::serve(share_args)),
+        Role::MuxObserve(observe_args) => exit_mux(fno::observe::serve(observe_args)),
         Role::MuxWebCtl(op) => {
             let tail = op.tail();
             exit_mux(mux_cli::web_ctl::web(op, &tail, env_session.as_deref()))
@@ -1501,9 +1584,22 @@ mod tests {
             decide_role(&os(&["do", "review", "classify", "--attest"]), false),
             Role::ReviewClassify(os(&["--attest"]))
         );
+        // --help is native now: no Python leg remains to list the leaves.
         assert_eq!(
             decide_role(&os(&["do", "review", "--help"]), false),
-            Role::Forward
+            Role::ReviewHelp
+        );
+        assert_eq!(
+            decide_role(&os(&["do", "review", "invocations"]), false),
+            Role::ReviewInvocations(os(&[]))
+        );
+        assert_eq!(
+            decide_role(&os(&["do", "review", "invocations", "--help"]), false),
+            Role::ReviewInvocations(os(&["--help"]))
+        );
+        assert_eq!(
+            decide_role(&os(&["review", "--help"]), false),
+            Role::ReviewHelp
         );
         // A leaf spelled later is a flag value, not a subcommand: claimed.
         assert_eq!(
@@ -2193,5 +2289,16 @@ mod tests {
         assert!(parse_share_args(&os(&["--share"])).is_none(), "no --pane");
         assert!(parse_share_args(&os(&["--share", "--pane", "x"])).is_none());
         assert!(parse_share_args(&os(&["--share", "--pane", "3", "--web"])).is_none());
+        // `--observe` also needs `--pane`, and takes an optional label.
+        let observe = parse_observe_args(&os(&["--observe", "--pane", "3", "--name", "teacher"]))
+            .expect("--observe parses");
+        assert_eq!(
+            (observe.pane, observe.name.as_deref()),
+            (3, Some("teacher"))
+        );
+        assert!(
+            parse_observe_args(&os(&["--observe"])).is_none(),
+            "no --pane"
+        );
     }
 }

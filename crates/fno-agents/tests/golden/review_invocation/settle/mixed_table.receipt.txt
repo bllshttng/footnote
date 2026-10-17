@@ -1,0 +1,3 @@
+invocations: 2 lost, 2 settled now
+  settled ri-golden-a at <head9>
+  settled ri-golden-b at <head9>

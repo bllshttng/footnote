@@ -91,28 +91,3 @@ def reconcile_plan(
             statuses.append(PathStatus(path, "stale-reference"))
             stale += 1
     return ReconcileDelta(present, stale, tuple(statuses))
-
-
-def _self_check() -> None:
-    import tempfile
-
-    with tempfile.TemporaryDirectory() as d:
-        root = Path(d)
-        (root / "src").mkdir()
-        (root / "src" / "here.py").write_text("x = 1\n", encoding="utf-8")
-        plan = root / "p.md"
-        plan.write_text(
-            "edits `src/here.py` and `src/gone.py`; gate `config.a.b`\n",
-            encoding="utf-8",
-        )
-        delta = reconcile_plan(plan, root)
-        assert delta.present == 1, delta
-        assert delta.stale == 1, delta
-        assert len(delta.paths) == 2, delta  # config.a.b excluded (no slash)
-        miss = reconcile_plan(root / "nope.md", root)
-        assert miss.note and "unknown" in miss.summary(), miss
-    print("reconcile self-check OK")
-
-
-if __name__ == "__main__":
-    _self_check()

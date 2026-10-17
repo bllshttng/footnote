@@ -858,76 +858,6 @@ fn review_start_audit_payload_len(fields: &serde_json::Map<String, serde_json::V
         .unwrap_or(usize::MAX)
 }
 
-pub(crate) fn review_invocation_id() -> String {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    format!("ri-{nanos:x}-{}", std::process::id())
-}
-
-pub(crate) fn review_invocation_sidecar(session_id: &str) -> Option<std::path::PathBuf> {
-    if session_id.is_empty()
-        || std::path::Path::new(session_id).file_name()?.to_str()? != session_id
-    {
-        return None;
-    }
-    // FNO_HOME first: the Python writer and both shell hooks key the sidecar
-    // off that override, so reading a different root silently breaks the
-    // join on every configured machine.
-    let root = std::env::var_os("FNO_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            crate::paths::AgentsHome::from_env()
-                .root()
-                .parent()
-                .map(std::path::Path::to_path_buf)
-        })?;
-    Some(
-        root.join("review-invocations")
-            .join(format!("{session_id}.json")),
-    )
-}
-
-/// Read AND consume a pending id, mirroring the Python adopt: without the
-/// unlink a stale sidecar is re-adopted forever and distinct reviews collapse
-/// into one invocation id.
-pub(crate) fn read_pending_review_invocation(session_id: &str) -> Option<String> {
-    let path = review_invocation_sidecar(session_id)?;
-    let raw = std::fs::read_to_string(&path).ok()?;
-    let _ = std::fs::remove_file(&path);
-    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    value
-        .get("invocation_id")
-        .and_then(serde_json::Value::as_str)
-        .filter(|id| !id.is_empty())
-        .map(str::to_string)
-}
-
-pub(crate) fn write_pending_review_invocation(session_id: &str, invocation_id: &str) -> bool {
-    let Some(path) = review_invocation_sidecar(session_id) else {
-        return false;
-    };
-    let Some(parent) = path.parent() else {
-        return false;
-    };
-    if std::fs::create_dir_all(parent).is_err() {
-        return false;
-    }
-    let Ok(mut file) = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-    else {
-        return false;
-    };
-    let value = serde_json::json!({
-        "invocation_id": invocation_id,
-        "target_session_id": session_id,
-    });
-    std::io::Write::write_all(&mut file, value.to_string().as_bytes()).is_ok()
-}
-
 fn review_invocation_event_fields(
     invocation_id: &str,
     thread_id: &str,
@@ -937,24 +867,31 @@ fn review_invocation_event_fields(
     confirmed: bool,
     receipt: &str,
 ) -> serde_json::Map<String, serde_json::Value> {
-    let command = audit_payload.unwrap_or("/review").trim();
-    let mut parts = command.splitn(2, char::is_whitespace);
-    let verb = parts
-        .next()
-        .filter(|token| token.starts_with('/'))
-        .unwrap_or("/review");
-    let args_raw = parts.next().unwrap_or("").trim_start();
-    let mut args = args_raw.split_whitespace();
-    let first_arg = args.next().unwrap_or("");
-    let (level, level_source) = match first_arg {
-        "ultra" => ("ultra", "ultra_forced"),
-        "low" | "medium" | "high" | "xhigh" | "max" => (first_arg, "explicit"),
-        _ => ("unset", "fallback"),
-    };
-    let flags: Vec<&str> = args_raw
-        .split_whitespace()
-        .filter(|arg| arg.starts_with("--"))
-        .collect();
+    // The one parser answers here too: level, flags and args_raw come from
+    // crate::review_invocation::owner::parse_review_invocation, so the codex leg
+    // records the same table as the mail and hook legs. Recorded behavior
+    // change: a bare `fix` (or `fix` led by one U+2014 character) now reads
+    // as --fix on codex, and an unknown -- token is recorded verbatim
+    // instead of matched loosely.
+    let command = audit_payload.unwrap_or("/review");
+    let parsed = crate::review_invocation::owner::parse_review_invocation(command);
+    let verb = parsed
+        .as_ref()
+        .map(|p| p.verb.clone())
+        .unwrap_or_else(|| "/review".to_string());
+    let args_raw = parsed
+        .as_ref()
+        .map(|p| p.args_raw.clone())
+        .unwrap_or_else(|| command.trim().to_string());
+    let level = parsed
+        .as_ref()
+        .map(|p| p.level.clone())
+        .unwrap_or_else(|| "unset".to_string());
+    let level_source = parsed
+        .as_ref()
+        .map(|p| p.level_source.clone())
+        .unwrap_or_else(|| "fallback".to_string());
+    let flags = parsed.map(|p| p.flags).unwrap_or_default();
     let initiator = match audit_origin {
         Some("operator") => "operator",
         Some("peer") => "lead",
@@ -1158,9 +1095,9 @@ pub async fn run_review_start(rest: &[String]) -> i32 {
             return 2;
         }
     };
-    let invocation_id =
-        read_pending_review_invocation(&thread_id).unwrap_or_else(|| review_invocation_id());
-    write_pending_review_invocation(&thread_id, &invocation_id);
+    let invocation_id = crate::review_invocation::owner::adopt_pending_invocation(&thread_id, None)
+        .unwrap_or_else(crate::review_invocation::owner::mint_invocation_id);
+    crate::review_invocation::owner::write_pending_invocation(&thread_id, &invocation_id, None);
     let outcome = match deliver_via_hosted_codex_thread(&thread_id, &target_raw, delivery).await {
         Some(outcome) => outcome,
         None => deliver_via_codex_review_start(&thread_id, &target, delivery).await,

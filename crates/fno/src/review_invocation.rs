@@ -1,33 +1,16 @@
-//! The mux client's `review_invocation` journal row: how a `/review`
-//! invocation was fired over the pane transport, and whether its transport
-//! confirmed delivery. Pure move out of `mux_cli.rs` (file-budget shrink),
-//! no edits.
+//! The mux transport half of the review-invocation owner: the command
+// projection and the journal writers. The pure core (parse, flags, mint,
+// sidecar) is spliced from review_invocation_core.rs, the file vendored
+// byte-identical into fno-agents.
 
-use std::path::{Path, PathBuf};
+include!("review_invocation_core.rs");
 
+/// The mux transport's projection: verb and args only, the signature
+/// `mux_cli.rs` has always called. The full parse is the one owner above.
 pub(crate) fn review_invocation_command(bytes: &[u8]) -> Option<(String, String)> {
-    let raw = std::str::from_utf8(bytes).ok()?.trim();
-    let mut parts = raw.splitn(2, char::is_whitespace);
-    let token = parts.next()?.strip_prefix('/')?;
-    let name = token.rsplit(':').next()?;
-    if !matches!(
-        name,
-        "code-review" | "review" | "review-changes" | "sigma-review"
-    ) {
-        return None;
-    }
-    Some((
-        format!("/{name}"),
-        parts.next().unwrap_or("").trim_start().to_string(),
-    ))
-}
-
-fn review_invocation_id() -> String {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    format!("ri-{nanos:x}-{}", std::process::id())
+    let raw = std::str::from_utf8(bytes).ok()?;
+    let parsed = parse_review_invocation(raw)?;
+    Some((parsed.verb, parsed.args_raw))
 }
 
 /// One journal resolver for the crate: setup's per-run events ride the
@@ -134,7 +117,7 @@ fn append_review_invocation_at(
         return;
     };
     let (branch, head_sha) = review_invocation_branch_and_head();
-    let invocation_id = review_invocation_id();
+    let invocation_id = mint_invocation_id();
     // `submitted` records whether this send carried a submit key at all. A
     // plain text write is not a submit, so it must not claim one: the row is
     // the transport fact an operator debugs a wedged review against.
@@ -167,37 +150,13 @@ fn append_review_invocation_at(
     let _ = crate::pane_send_audit::append_agents_event(path, &event);
 }
 
-pub(crate) fn review_invocation_timestamp() -> String {
-    let seconds = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let days = (seconds / 86_400) as i64;
-    let remainder = seconds % 86_400;
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let year = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let month_part = (5 * doy + 2) / 153;
-    let day = doy - (153 * month_part + 2) / 5 + 1;
-    let month = if month_part < 10 {
-        month_part + 3
-    } else {
-        month_part - 9
-    };
-    let year = if month <= 2 { year + 1 } else { year };
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
-        remainder / 3_600,
-        (remainder % 3_600) / 60,
-        remainder % 60
-    )
-}
+/// Wall-clock RFC3339 UTC timestamp, seconds precision, no chrono in the
+/// dependency surface. Shared with the invocations door's appends.
 
+// Distinct from the spliced core's `tests`: the include! pastes that module
+// into this one, and two `tests` in one namespace is E0428 under cfg(test).
 #[cfg(test)]
-mod tests {
+mod review_transport_tests {
     use super::*;
 
     fn stored_event(path: &std::path::Path) -> serde_json::Value {

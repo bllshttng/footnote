@@ -1,0 +1,12 @@
+{
+ "args_raw": "high -- --comment",
+ "flags": [
+  "--",
+  "--comment"
+ ],
+ "level": "high",
+ "level_source": "explicit",
+ "pr_number": null,
+ "target": null,
+ "verb": "/review"
+}

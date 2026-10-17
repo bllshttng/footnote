@@ -1,0 +1,277 @@
+[
+ {
+  "family": "parse",
+  "label": "review bare",
+  "raw": "/review"
+ },
+ {
+  "family": "parse",
+  "label": "code-review bare",
+  "raw": "/code-review"
+ },
+ {
+  "family": "parse",
+  "label": "review-changes bare",
+  "raw": "/review-changes"
+ },
+ {
+  "family": "parse",
+  "label": "sigma-review bare",
+  "raw": "/sigma-review"
+ },
+ {
+  "family": "parse",
+  "label": "plugin qualified",
+  "raw": "/fno:review high --comment"
+ },
+ {
+  "family": "parse",
+  "label": "level low",
+  "raw": "/review low"
+ },
+ {
+  "family": "parse",
+  "label": "level medium",
+  "raw": "/review medium"
+ },
+ {
+  "family": "parse",
+  "label": "level high",
+  "raw": "/review high"
+ },
+ {
+  "family": "parse",
+  "label": "level xhigh",
+  "raw": "/review xhigh"
+ },
+ {
+  "family": "parse",
+  "label": "level max",
+  "raw": "/review max"
+ },
+ {
+  "family": "parse",
+  "label": "ultra forced",
+  "raw": "/review ultra --fix 42"
+ },
+ {
+  "family": "parse",
+  "label": "comment flag",
+  "raw": "/review high --comment 123"
+ },
+ {
+  "family": "parse",
+  "label": "bare fix word",
+  "raw": "/review fix"
+ },
+ {
+  "family": "parse",
+  "label": "em dash fix",
+  "raw": "/review \u2014fix"
+ },
+ {
+  "family": "parse",
+  "label": "en dash is not a flag",
+  "raw": "/review high \u2013comment"
+ },
+ {
+  "family": "parse",
+  "label": "unknown novel flag",
+  "raw": "/review high --novel 55"
+ },
+ {
+  "family": "parse",
+  "label": "pr number target",
+  "raw": "/review 312"
+ },
+ {
+  "family": "parse",
+  "label": "pr url trailing slash",
+  "raw": "/review https://github.com/o/r/pull/77/"
+ },
+ {
+  "family": "parse",
+  "label": "branch target",
+  "raw": "/review feature/x"
+ },
+ {
+  "family": "parse",
+  "label": "quoted target",
+  "raw": "/review high --comment \"two words\""
+ },
+ {
+  "family": "parse",
+  "label": "unbalanced quote falls back",
+  "raw": "/review high 'unclosed"
+ },
+ {
+  "family": "parse",
+  "label": "non review verb",
+  "raw": "/compact"
+ },
+ {
+  "family": "parse",
+  "label": "empty payload",
+  "raw": ""
+ },
+ {
+  "family": "parse",
+  "label": "leading slashes",
+  "raw": "///review high"
+ },
+ {
+  "family": "parse",
+  "label": "double dash comment",
+  "raw": "/review high -- --comment"
+ },
+ {
+  "family": "sidecar",
+  "label": "valid sidecar adopted",
+  "home": "set",
+  "session": "s-valid",
+  "preset": "valid"
+ },
+ {
+  "family": "sidecar",
+  "label": "corrupt sidecar consumed",
+  "home": "set",
+  "session": "s-corrupt",
+  "preset": "corrupt"
+ },
+ {
+  "family": "sidecar",
+  "label": "missing sidecar mints",
+  "home": "set",
+  "session": "s-missing",
+  "preset": null
+ },
+ {
+  "family": "sidecar",
+  "label": "empty session mints unwritten",
+  "home": "set",
+  "session": "",
+  "preset": null
+ },
+ {
+  "family": "sidecar",
+  "label": "default home join",
+  "home": "unset",
+  "session": "s-default",
+  "preset": "valid"
+ },
+ {
+  "family": "settle",
+  "label": "lost settles once",
+  "rows": [
+   {
+    "id": "ri-golden-lost",
+    "kind": "sent",
+    "age_minutes": 120
+   }
+  ],
+  "detached": false
+ },
+ {
+  "family": "settle",
+  "label": "answered by attestation never settles",
+  "rows": [
+   {
+    "id": "ri-golden-att",
+    "kind": "sent",
+    "age_minutes": 120
+   },
+   {
+    "id": "ri-golden-att",
+    "kind": "attested",
+    "age_minutes": 60
+   }
+  ],
+  "detached": false
+ },
+ {
+  "family": "settle",
+  "label": "refused stage answers",
+  "rows": [
+   {
+    "id": "ri-golden-ref",
+    "kind": "sent",
+    "age_minutes": 120
+   },
+   {
+    "id": "ri-golden-ref",
+    "kind": "refused",
+    "age_minutes": 60
+   }
+  ],
+  "detached": false
+ },
+ {
+  "family": "settle",
+  "label": "unjoined sentinel skipped",
+  "rows": [
+   {
+    "id": "UNJOINED",
+    "kind": "sent",
+    "age_minutes": 120
+   }
+  ],
+  "detached": false
+ },
+ {
+  "family": "settle",
+  "label": "fresh inside ttl stays",
+  "rows": [
+   {
+    "id": "ri-golden-fresh",
+    "kind": "sent",
+    "age_minutes": 1
+   }
+  ],
+  "detached": false
+ },
+ {
+  "family": "settle",
+  "label": "detached head refuses",
+  "rows": [
+   {
+    "id": "ri-golden-det",
+    "kind": "sent",
+    "age_minutes": 120
+   }
+  ],
+  "detached": true
+ },
+ {
+  "family": "settle",
+  "label": "mixed table",
+  "rows": [
+   {
+    "id": "ri-golden-a",
+    "kind": "sent",
+    "age_minutes": 200
+   },
+   {
+    "id": "ri-golden-b",
+    "kind": "sent",
+    "age_minutes": 120,
+    "verb": "/review-changes"
+   },
+   {
+    "id": "ri-golden-c",
+    "kind": "sent",
+    "age_minutes": 2
+   },
+   {
+    "id": "ri-golden-d",
+    "kind": "sent",
+    "age_minutes": 300
+   },
+   {
+    "id": "ri-golden-d",
+    "kind": "attested",
+    "age_minutes": 30
+   }
+  ],
+  "detached": false
+ }
+]

@@ -299,11 +299,18 @@ fn raw_send(
     let mut failure_reasons: Vec<String> = Vec::new();
     let mut invocation_id: Option<String> = None;
     if review.is_some() && !check {
-        let minted = crate::codex_inject::review_invocation_id();
-        if !crate::codex_inject::write_pending_review_invocation(&session_id, &minted) {
+        // The one owner of the mint and the pending sidecar is the vendored
+        // core behind review_invocation::owner; this lane answers from it
+        // like the door and the codex leg do.
+        let minted = crate::review_invocation::owner::mint_invocation_id();
+        if !crate::review_invocation::owner::write_pending_invocation(&session_id, &minted, None) {
             // A stale sidecar owns the slot: consume it, then retry the write.
-            let _ = crate::codex_inject::read_pending_review_invocation(&session_id);
-            let _ = crate::codex_inject::write_pending_review_invocation(&session_id, &minted);
+            let _ = crate::review_invocation::owner::adopt_pending_invocation(&session_id, None);
+            let _ = crate::review_invocation::owner::write_pending_invocation(
+                &session_id,
+                &minted,
+                None,
+            );
         }
         invocation_id = Some(minted);
     }

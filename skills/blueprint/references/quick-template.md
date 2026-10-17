@@ -174,14 +174,22 @@ no index is present, the first line says so.]
 4. **Deletable**: what in this plan could be deleted and the goal would still ship? Name it, or name the last thing you considered cutting.
 5. **Duplication**: which existing module already implements this, or could be extended so the feature falls out? Name the module and relationship, or `none` after checking `rg` for the plan's key symbols and the dual-implementation inventory.
 
-## Design
+## Routes
 
-[Step 2e, written before any task. Four parts; a plan that changes no type and no module boundary writes the single line `none: <why>`.]
+[Step 2e, written before any task. Two or three candidates; do not pick one. `/target` appends `chosen: <n> - <why>` after it measures.]
 
-- **Types:** each new or changed shape, its states, and which states are illegal. Prefer a shape that cannot hold an illegal state.
-- **Owners:** the one module that writes each fact. Every other module reads through it.
-- **Seams:** per touched module, what callers see and what stays hidden.
-- **Extends:** the existing module this grows, or why none fits.
+1. [Candidate route] - ruled out by: [the measured fact that kills it]
+2. [Candidate route] - ruled out by: [...]
+
+## Unknowns
+
+[One line per fact the plan depends on but did not measure. `/target` settles each one before code: `- [x] <question> - settled: <finding>`. `fno do pr create` refuses while a `- [ ]` line stays open. Write `none: <why>` when every fact is measured.]
+
+- [ ] [Question] - measure: [command or read that settles it]
+
+## Done
+
+[The deliverable as a measured number, and the command that measures it. The same command goes in frontmatter `done_probes:`.]
 
 ## Changes
 

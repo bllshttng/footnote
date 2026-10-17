@@ -1,0 +1,12 @@
+[
+ {
+  "head": "<head9>",
+  "invocation_id": "ri-golden-a",
+  "settled": true
+ },
+ {
+  "head": "<head9>",
+  "invocation_id": "ri-golden-b",
+  "settled": true
+ }
+]

@@ -2229,12 +2229,16 @@ def _review_invocation_report(
     settle_results: dict[str, dict[str, Any]] = {}
     settle_error = ""
     try:
-        from fno.review.invocation import invocation_ttl_minutes, settle_lost_invocations
+        from fno import rust_binary
 
-        for row in settle_lost_invocations(
-            ttl_minutes=invocation_ttl_minutes(), now=observed_at
-        ):
-            settle_results[str(row.get("invocation_id"))] = row
+        settle_err, rows = rust_binary.call_binary_json(
+            "review-level", ["invocations", "settle", "--json"]
+        )
+        if settle_err is not None or not isinstance(rows, list):
+            settle_error = settle_err or "unusable settle receipt"
+        else:
+            for row in rows:
+                settle_results[str(row.get("invocation_id"))] = row
     except Exception as exc:  # noqa: BLE001 - report the refusal, never die
         settle_error = str(exc)
     lines = [

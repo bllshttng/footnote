@@ -28,6 +28,7 @@ When `$CODEX_THREAD_ID` is nonblank, before any routing or work, Print exactly o
 ```
 resolve node  →  fno do target start <node>   worktree off origin/main + claim + init prints the orienter
               →  Step 0 (only if STALE)     orienter says boundary-reconcile: STALE -> read blocker diffs, append landed-facts sections
+              →  investigate                settle each open `- [ ]` unknown in the plan, append `chosen:` under ## Routes
               →  implement                  edit the plan; atomic commits as you go
               →  validate                    fno doctor test <changed test files>  (real exit code; not bare pytest; never the whole suite - CI runs it)
               →  review                      /fno:review <size> --comment on local HEAD, in this session (held; posts when the PR opens)
@@ -59,6 +60,7 @@ That is the whole job when a backlog node or plan is already bound. `fno do targ
 - **A `<help>` starts a workflow, never a stop.** Emit the `class` attribute. The classes: stale-plan, missing-prereq, ci-red, stuck, held, wait, env-denied, gate-deadlock, gate-unsatisfiable, question, budget. Take the routed step. The router blocks the in-session classes with their next move. It mails the off-session ones to the rung that owns them. It climbs the question ladder until a named owner rules. STOP only for irreversible, money, public surface, or taste. The class table: [docs/architecture/help-routing.md](docs/architecture/help-routing.md).
 - **only if** `.fno/target-state.md` already exists for this session: you are **mid-loop** - re-verify the world and re-emit `<promise>`; do NOT re-init or rebuild.
 - **only if** dispatching nodes to run unsupervised (`bg`) or running a batch-lane member (`batched`): [references/bg-and-batched-modes.md](references/bg-and-batched-modes.md).
+- **Investigate before code.** The blueprint lists routes and unknowns, never the route. Before the first source edit, measure each `- [ ]` line under the plan's `## Unknowns`, write `- [x] ... - settled: <finding>`, and append `chosen: <n> - <why>` under `## Routes`. A bug node, or a plan that lists the cause as an unknown, runs the hypothesis loop first. A red CI run after the PR opens runs the bundled fix loop. `fno do pr create` refuses (exit 6) while an unknown stays open. Procedure: [references/investigate-phase.md](references/investigate-phase.md).
 - **only if** the orienter printed `boundary-reconcile: STALE`: perform **Step 0** before any code commit - for each stale blocker, read its merged diff (`gh pr diff <n>`) and append a `### <blocker> landed ... - boundary reconcile` landed-facts section to the plan/brief. This is a *different* thing from de-stub reconcile below (hard-serialized dependent vs a stubbed contract). Full procedure + section format: [references/boundary-reconcile.md](references/boundary-reconcile.md).
 - If init printed `target: premise:` or `target: plan:` verdict lines (`fno backlog freshness`): advisory warnings, never a stop. On `premise: shipped` or `plan: void`, read the named PRs and note the reading on the node. On `plan: drifted`, re-read every named file at the plan's cited ranges before trusting a line number. On `premise: changed` or `partly_shipped`, read the named PRs and say in the first commit body why the work stands. No `<help>` and no refusal: v1 warns only, so a measured false-positive rate decides a later refusal upgrade.
 - If the seat order says to build first, make the first source edit before any blueprint amend ([Amend](../blueprint/SKILL.md#amend-a-plan-that-is-already-ready)). After 20 minutes with no edit, the daemon burn arm mails your lead.
@@ -414,6 +416,9 @@ Loaded by state — the "read X when Y" load conditions are inline above; this i
 - [references/usage-detail.md](references/usage-detail.md) - Interactive wizard, execution modes, context lifecycle, model optimization
 - [references/init-state.md](references/init-state.md) - Steps 1-3f initialization sequence
 - [references/boundary-reconcile.md](references/boundary-reconcile.md) - STALE boundary reconcile procedure
+- [references/investigate-phase.md](references/investigate-phase.md) - Settle the plan's unknowns and pick its route before code
+- [references/investigate.md](references/investigate.md) - Hypothesis loop for an unknown cause (bundled from /fix)
+- [references/fix-loop.md](references/fix-loop.md) - One-fix-per-iteration repair loop for red CI (bundled from /fix)
 - [references/reconcile-mode.md](references/reconcile-mode.md) - `--reconcile` de-stub pass contract
 - [references/phase-transition-guards.md](references/phase-transition-guards.md) - Acceptance criteria gate before /execute waves
 - [references/phase-invocations.md](references/phase-invocations.md) - Phase routing + invocation logic + Linear sync + validate artifact

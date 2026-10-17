@@ -44,7 +44,6 @@ from contextlib import suppress
 from typing import Any, Callable, NamedTuple, Optional
 
 from pathlib import Path
-from fno.review.invocation import VERIFY_FIXES
 
 
 # Not a global-id prefix (the native routing list lives in
@@ -167,7 +166,7 @@ def acquire_review_hold(
 
 # --- The review-cap invocation gate: the cap held at the merge decision only,
 # so rounds three through five ran against a saturated counter.
-VERIFY_FIXES_FLAG = f"--{VERIFY_FIXES}"  # spelled by invocation, the flag authority
+VERIFY_FIXES_FLAG = "--verify-fixes"  # spelled by fno::review_invocation::VERIFY_FIXES
 
 
 def _code_patch_lines(cwd: str, base: str, sha: str) -> Optional[list[str]]:

@@ -1,4 +1,4 @@
-# Capability tier: does /fno:blueprint shape the type before it cuts tasks?
+# Capability tier: does /fno:blueprint rule out the type that restates a count?
 # Specimen: a `[&str; 15]` key list restated its data's count; five commits
 # only fixed the length and one turned main red before it became a slice.
 # The request adds two keys and says more land every week. A plan that
@@ -21,7 +21,9 @@ grade:
     # The plan replaces the fixed-length array with a shape that holds no count.
     command: "grep -qE '&\\[&str\\]|Vec<' evals/fixtures/judgment-design/plan.md"
   - kind: exit
-    command: "grep -qF '[&str; 5]' evals/fixtures/judgment-design/plan.md"
+    # A plan lists routes, so the length bump may appear, but only as a
+    # route it rules out: every line naming it says why it is ruled out.
+    command: "grep -F '[&str; 5]' evals/fixtures/judgment-design/plan.md | grep -viq 'rule'"
     expect: 1
 timeout_minutes: 20
 tags: [judgment, blueprint]

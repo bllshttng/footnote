@@ -1,0 +1,11 @@
+{
+ "args_raw": "ultra --fix 42",
+ "flags": [
+  "--fix"
+ ],
+ "level": "ultra",
+ "level_source": "ultra_forced",
+ "pr_number": 42,
+ "target": "42",
+ "verb": "/review"
+}

@@ -75,13 +75,6 @@ def test_absolute_path_does_not_bypass_repo_root(tmp_path: Path) -> None:
     assert delta.stale == 1 and delta.present == 0
 
 
-def test_self_check_runs() -> None:
-    # The module ships a runnable assert-based self-check.
-    from fno.plan import reconcile
-
-    reconcile._self_check()
-
-
-def test_is_dataclass_immutable() -> None:
+def test_empty_delta_summary_reads_none() -> None:
     d = ReconcileDelta(present=0, stale=0, paths=())
     assert d.summary().startswith("none")

@@ -108,6 +108,8 @@ pub enum MuxCmd {
     /// the bridge's own (parse_web_args keeps them exact).
     /// `mux serve --share --pane <id> [--steer] [--tunnel]` shows one masked
     /// pane to viewers the driver admits (parse_share_args).
+    /// `mux serve --observe --pane <id> [--name <label>]` watches one masked
+    /// pane read-only in this terminal, over `ssh -t` (parse_observe_args).
     #[command(disable_help_flag = true)]
     Serve(MuxTail),
     /// `mux web reap [--json]`: the bridge marker's corpse sweep. A bare

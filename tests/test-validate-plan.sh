@@ -2166,11 +2166,11 @@ else
     fail "AC13n: expected a clean section: $CIA_OUT"
 fi
 
-# --- AC14: Design section (step 2e gate) ---
-# A plan dated after the gate with no ## Design is refused; the design-doc
-# path used to reach ready with none. On the gate date it warns, and a
-# `## Design` heading (even `none: <why>`) prints the receipt.
-echo "--- AC14: Design Section ---"
+# --- AC14: Routes and unknowns (step 2e gate) ---
+# A plan dated after the routes gate needs ## Routes and ## Unknowns; the
+# older ## Design satisfies only a plan dated on or before it. The design-doc
+# path used to reach ready with neither. Before the first gate it warns.
+echo "--- AC14: Routes and Unknowns ---"
 design_plan() {
     cat > "$1" <<HEREDOC
 ---
@@ -2189,27 +2189,38 @@ HEREDOC
 PLAN_DESIGN_NONE="$TMPDIR_BASE/design_none.md"
 design_plan "$PLAN_DESIGN_NONE" 2026-10-17 ""
 OUTPUT=$(bash "$VALIDATE" "$PLAN_DESIGN_NONE" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
-if [[ $EXIT_CODE -eq 1 ]] && grep -q "ERROR: design_none.md: no ## Design section - step 2e" <<< "$OUTPUT"; then
-    pass "AC14a: post-gate plan without ## Design is refused"
+if [[ $EXIT_CODE -eq 1 ]] && grep -q "ERROR: design_none.md: no ## Routes and ## Unknowns sections - step 2e" <<< "$OUTPUT"; then
+    pass "AC14a: post-gate plan with neither section is refused"
 else
-    fail "AC14a: post-gate plan without ## Design should fail closed (exit $EXIT_CODE): $OUTPUT"
+    fail "AC14a: post-gate plan with neither section should fail closed (exit $EXIT_CODE): $OUTPUT"
 fi
 PLAN_DESIGN_OLD="$TMPDIR_BASE/design_old.md"
 design_plan "$PLAN_DESIGN_OLD" 2026-10-16 ""
 OUTPUT=$(bash "$VALIDATE" "$PLAN_DESIGN_OLD" 2>&1) || true
-if grep -q "WARN:  design_old.md: no ## Design section (plan predates" <<< "$OUTPUT"; then
-    pass "AC14b: a plan dated on the gate day only warns"
+if grep -q "WARN:  design_old.md: no ## Routes and ## Unknowns sections (plan predates" <<< "$OUTPUT"; then
+    pass "AC14b: a plan dated on the first gate day only warns"
 else
     fail "AC14b: on-gate plan should warn, not refuse: $OUTPUT"
 fi
 PLAN_DESIGN_OK="$TMPDIR_BASE/design_ok.md"
 design_plan "$PLAN_DESIGN_OK" 2026-10-17 $'## Design\n\nnone: docs-only fixture'
 OUTPUT=$(bash "$VALIDATE" "$PLAN_DESIGN_OK" 2>&1) || true
-if grep -q "OK:    design_ok.md: ## Design present (step 2e gate)" <<< "$OUTPUT" \
-    && ! grep -q "no ## Design section" <<< "$OUTPUT"; then
-    pass "AC14c: a ## Design heading satisfies the gate"
+if grep -q "OK:    design_ok.md: ## Design present (plan predates the routes gate)" <<< "$OUTPUT"; then
+    pass "AC14c: ## Design still satisfies a plan dated on the routes gate day"
 else
     fail "AC14c: ## Design should print the receipt: $OUTPUT"
+fi
+PLAN_DESIGN_LATE="$TMPDIR_BASE/design_late.md"
+design_plan "$PLAN_DESIGN_LATE" 2026-10-18 $'## Design\n\nnone: docs-only fixture'
+OUTPUT=$(bash "$VALIDATE" "$PLAN_DESIGN_LATE" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+PLAN_ROUTES="$TMPDIR_BASE/routes_ok.md"
+design_plan "$PLAN_ROUTES" 2026-10-18 $'## Routes\n\n1. edit in place\n\n## Unknowns\n\nnone: docs only'
+ROUTES_OUT=$(bash "$VALIDATE" "$PLAN_ROUTES" 2>&1) || true
+if [[ $EXIT_CODE -eq 1 ]] && grep -q "ERROR: design_late.md: no ## Routes and ## Unknowns" <<< "$OUTPUT" \
+    && grep -q "OK:    routes_ok.md: ## Routes and ## Unknowns present (step 2e gate)" <<< "$ROUTES_OUT"; then
+    pass "AC14d: after the routes gate only ## Routes and ## Unknowns satisfy it"
+else
+    fail "AC14d: post-routes-gate plan: design-only=$OUTPUT routes=$ROUTES_OUT"
 fi
 
 # --- Summary ---

@@ -11,6 +11,7 @@
 //! process mechanics.
 
 use std::io::{BufRead, BufReader, Read, Seek};
+use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -79,6 +80,7 @@ pub fn run(ask: &serde_json::Value) -> serde_json::Value {
     let mut child = match Command::new(&argv[0])
         .args(&argv[1..])
         .current_dir(&cwd)
+        .process_group(0)
         .stdout(Stdio::piped())
         .stderr(Stdio::from(stderr_child))
         .spawn()
@@ -89,7 +91,7 @@ pub fn run(ask: &serde_json::Value) -> serde_json::Value {
     let stdout = match child.stdout.take() {
         Some(stdout) => stdout,
         None => {
-            let _ = child.kill();
+            crate::bounded_spawn::kill_process_group(&mut child);
             let _ = child.wait();
             return serde_json::json!({ "refused": "agy mint produced no stdout pipe" });
         }
@@ -130,7 +132,10 @@ pub fn run(ask: &serde_json::Value) -> serde_json::Value {
             }
         }
     }
-    let _ = child.kill();
+    // The holder's children (a script's `sleep`, agy's own helpers) share the
+    // group: a lone child.kill() orphans them with the session cwd, where the
+    // test-run sweep reads every rooted stray as this session's leak.
+    crate::bounded_spawn::kill_process_group(&mut child);
     let status = child.wait();
     if !conversation_id.is_empty() {
         return serde_json::json!({ "conversation_id": conversation_id });

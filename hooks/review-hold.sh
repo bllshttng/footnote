@@ -93,11 +93,12 @@ esac
 cwd="$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null || true)"
 [[ -n "$cwd" && -d "$cwd" ]] || cwd="$PWD"
 
-plugin_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd || true)"
-helper_path="${plugin_root:+$plugin_root/cli/src}"
-parsed="$(PYTHONPATH="$helper_path${PYTHONPATH:+:$PYTHONPATH}" \
-  python3 -c 'import json, sys; from fno.review.invocation import parse_review_invocation; print(json.dumps(parse_review_invocation(sys.argv[1]) or {}))' \
-  "$skill_raw" 2>/dev/null || true)"
+# The parse and the join ride the CLI's rust seam directly, the way the
+# deleted python leg did: FNO is the test-stub surface for the verbs this
+# hook DRIVES (acquire, event emit), not for its own plumbing.
+parsed="$(python3 -c 'import json, sys; from fno import rust_binary
+err, row = rust_binary.call_binary_json("review-level", ["invocations", "parse", "--raw", sys.argv[1]])
+print(json.dumps(row) if err is None and row is not None else "")' "$skill_raw" 2>/dev/null || true)"
 args_raw="$(printf '%s' "$parsed" | jq -r '.args_raw // empty' 2>/dev/null || true)"
 level="$(printf '%s' "$parsed" | jq -r '.level // "unset"' 2>/dev/null || echo unset)"
 level_source="$(printf '%s' "$parsed" | jq -r '.level_source // "fallback"' 2>/dev/null || echo fallback)"
@@ -105,6 +106,18 @@ flags="$(printf '%s' "$parsed" | jq -c '.flags // []' 2>/dev/null || echo '[]')"
 [[ -n "$level" ]] || level="unset"
 [[ -n "$level_source" ]] || level_source="fallback"
 [[ -n "$flags" ]] || flags='[]'
+if [[ -z "$parsed" ]]; then
+  # Degraded mode: the parse door is unreachable (stale or missing binary),
+  # so the telemetry dies with it. The round law's verify-fixes carveout
+  # must not: a cap refusal that eats the flag would defund the one
+  # review-shaped act the cap still funds. Scan the raw args for the three
+  # accepted spellings and fund the verify; nothing else is inferred here.
+  em="$(printf '—')"
+  case " $skill_raw " in
+    *" --verify-fixes "*|*" verify-fixes "*|*" ${em}verify-fixes "*)
+      flags='["--verify-fixes"]' ;;
+  esac
+fi
 pr_number="$(printf '%s' "$parsed" | jq -r '.pr_number // empty' 2>/dev/null || true)"
 target="$(printf '%s' "$parsed" | jq -r '.target // empty' 2>/dev/null || true)"
 
@@ -144,28 +157,25 @@ fi
 session="$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null || true)"
 holder="review-session:${session:-unknown}"
 
-# The helper is best-effort because this hook must never block the review. The
-# shell fallback still creates a join id when an installed fno package cannot
-# be imported by the hook process.
+# The native door is best-effort because this hook must never block the
+# review. The shell fallback still creates a join id when an older installed
+# front door answers something other than an id (its invocations leaf ran the
+# settle sweep, or the door refused) - the ri- guard reads only an id, never
+# a receipt.
 # Adopt the sender's pending id when one exists (the mail-path join: the
 # sent row and this started row then carry ONE id), and only mint-plus-write
 # a fresh sidecar on a miss, so a second review never re-adopts the first
 # one's consumed id.
-invocation_id="$(PYTHONPATH="$helper_path${PYTHONPATH:+:$PYTHONPATH}" \
-  python3 -c '
-from fno.review.invocation import adopt_pending_invocation, mint_invocation_id, write_pending_invocation
-import sys
-s = sys.argv[1]
-i = adopt_pending_invocation(s) if s else None
-if i is None:
-    i = mint_invocation_id()
-    if s:
-        write_pending_invocation(target_session_id=s, invocation_id=i)
-print(i)' \
-  "$session" 2>/dev/null || true)"
-if [[ -z "$invocation_id" ]]; then
-  invocation_id="ri-$(date -u +%s 2>/dev/null || echo 0)-$$"
-fi
+invocation_id="$(python3 -c 'import subprocess, sys; from fno import rust_binary
+binary = rust_binary.resolve_binary()
+if binary is None:
+    raise SystemExit(1)
+proc = subprocess.run([str(binary), "review-level", "invocations", "join", "--session", sys.argv[1]], capture_output=True, text=True)
+print(proc.stdout.strip() if proc.returncode == 0 else "")' "$session" 2>/dev/null || true)"
+case "$invocation_id" in
+  ri-*) ;;
+  *) invocation_id="ri-$(date -u +%s 2>/dev/null || echo 0)-$$" ;;
+esac
 model_sidecar="${FNO_HOME:-$HOME/.fno}/attest/${session}.json"
 model_family="$(jq -r '.model_family // .model // empty' "$model_sidecar" 2>/dev/null || true)"
 data="$(jq -cn \

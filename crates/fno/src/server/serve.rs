@@ -68,6 +68,7 @@ pub(super) async fn serve(
         backlog_lanes: Vec::new(),
         backlog_stale: false,
         backlog_holders: HashMap::new(),
+        observers: Default::default(),
         backlog_join: crate::backlog_view::BacklogJoin::default(),
         claim_eligible: HashSet::new(),
         claims: HashMap::new(),

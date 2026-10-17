@@ -157,6 +157,10 @@ pub enum ClientMsg {
     /// the spawn door, never an argv element.
     AgentLaunch(crate::proto::agent_launch::AgentLaunchRequest),
     PaneInput(pane_input::PaneInputRequest),
+    /// (v116) A passive client names itself and the pane it watches, right
+    /// after `Attach`. Ignored from a non-passive client. The tag lasts as
+    /// long as the connection.
+    Observe(crate::proto::observer::ObserverHello),
 }
 
 /// Server -> client.
@@ -230,6 +234,9 @@ pub enum ServerMsg {
         /// the announcer is absent.
         #[serde(default)]
         proto: Option<u32>,
+        /// (v116) Who watches which pane: one row per tagged passive client.
+        #[serde(default)]
+        observers: Vec<crate::proto::observer::ObserverRow>,
     },
     /// Escape bytes syncing the client terminal to the newly focused pane's
     /// negotiated modes (bracketed paste, mouse reporting, DECCKM, ...).

@@ -71,6 +71,8 @@ pub enum Part {
     Branch,
     /// The context-used string on the bottom edge.
     Ctx,
+    /// The watcher count (`◉ 2`) leading the top-right span.
+    Observers,
 }
 
 /// The fields an edge may carry, plain data with no styling. A missing field
@@ -84,6 +86,9 @@ pub struct EdgeFields<'a> {
     pub node: Option<&'a str>,
     pub branch: Option<&'a str>,
     pub ctx: Option<&'a str>,
+    /// How many observers watch this pane. Shown on every drop step, because
+    /// the driver must always be able to see that someone is watching.
+    pub observers: usize,
 }
 
 /// One pane's two edges: full rows (corners included), each exactly
@@ -122,13 +127,23 @@ fn fit_row(row: &[(char, Part)], max_cols: usize) -> Vec<(char, Part)> {
     out
 }
 
-/// The top-right status span per drop step: 0 ` ● Work · opus-5 `, 3 (model
-/// dropped) ` ● Work `, 4 (word dropped) ` ● `. No status, no span.
+/// The top-right span per drop step: 0 ` ● Work · opus-5 `, 3 (model
+/// dropped) ` ● Work `, 4 (word dropped) ` ● `. No status, no status span. A
+/// watched pane leads every step with its observer count, ` ◉ 2 ● Work `.
 fn top_right(f: &EdgeFields, step: usize) -> Vec<(char, Part)> {
+    let mut row = Vec::new();
+    if f.observers > 0 {
+        row.push((' ', Part::Border));
+        seg(&mut row, &format!("◉ {}", f.observers), Part::Observers);
+    }
     let Some((g, word)) = f.status else {
-        return Vec::new();
+        if !row.is_empty() {
+            row.push((' ', Part::Border));
+        }
+        return row;
     };
-    let mut row = vec![(' ', Part::Border), (g, Part::Glyph)];
+    row.push((' ', Part::Border));
+    row.push((g, Part::Glyph));
     if step < 4 {
         seg(&mut row, &format!(" {word} "), Part::Word);
         if step == 0 {
@@ -341,6 +356,7 @@ mod tests {
             node: Some("node7"),
             branch: Some("main"),
             ctx: Some("49%"),
+            observers: 0,
         }
     }
 
@@ -522,11 +538,41 @@ mod tests {
             node: None,
             branch: None,
             ctx: None,
+            observers: 0,
         };
         let e = edges(&bare, rect(40, 12), false);
         let top = s(&e.top);
         assert!(top.starts_with("╭─ zsh ─") && top.ends_with('╮'), "{top}");
         assert_eq!(cols_of(&e.top), 40);
         assert_eq!(s(&e.bottom), format!("╰{}╯", "─".repeat(38)));
+    }
+
+    // The driver must always see that someone is watching.
+    #[test]
+    fn observers_lead_the_top_right_and_outlast_the_name() {
+        let watched = EdgeFields {
+            observers: 2,
+            ..full()
+        };
+        let wide = edges(&watched, rect(100, 12), false);
+        assert!(
+            s(&wide.top).ends_with(" ◉ 2 ● Work · opus-5 ╮"),
+            "{}",
+            s(&wide.top)
+        );
+
+        // 29 cols with a grip: the status words drop, the count stays, and the
+        // name tab gives up cells instead.
+        let narrow = edges(&watched, rect(29, 12), true);
+        assert!(s(&narrow.top).contains("◉ 2 ●"), "{}", s(&narrow.top));
+        assert_eq!(cols_of(&narrow.top), 29);
+
+        let shell = EdgeFields {
+            status: None,
+            observers: 1,
+            ..full()
+        };
+        let bare = edges(&shell, rect(60, 12), false);
+        assert!(s(&bare.top).ends_with(" ◉ 1 ╮"), "{}", s(&bare.top));
     }
 }

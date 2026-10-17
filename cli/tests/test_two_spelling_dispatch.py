@@ -32,7 +32,9 @@ def _clean(text: str) -> str:
 
 
 HELP_SURFACES: dict[str, list[str]] = {
-    "review": ["review", "--help"],
+    # review is not here: the surface moved native, the rust binary claims
+    # `review --help` directly, and the in-process typer app no longer
+    # registers it for this harness-free invocation to reach.
     "retro-run": ["retro", "run", "--help"],
     "worker-review": ["worker", "review", "--help"],
     "worker-external": ["worker", "external", "--help"],

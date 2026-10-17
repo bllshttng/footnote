@@ -1,0 +1,7 @@
+[
+ {
+  "invocation_id": "ri-golden-det",
+  "reason": "no readable head to pin (not a git repo or detached HEAD)",
+  "settled": false
+ }
+]

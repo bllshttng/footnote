@@ -113,6 +113,12 @@ bundles:
         dest: references/lenses/test_scenarios.md
       - source: skills/blueprint/references/lenses/code/unlock_order.md
         dest: references/lenses/unlock_order.md
+      # The root-cause discipline: /target is the one entry for all work, so it
+      # carries the /fix loops instead of handing off to another driver.
+      - source: skills/fix/references/investigate.md
+        dest: references/investigate.md
+      - source: skills/fix/references/fix-loop.md
+        dest: references/fix-loop.md
 
   # Cluster router: /fix. The default fix loop (SKILL.md) and the investigate
   # flow (references/investigate.md) plus their references are canonical in the folder.

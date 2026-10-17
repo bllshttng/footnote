@@ -5057,12 +5057,10 @@ fn open_here_refuses_conflicting_placement_before_spawn() {
     }
 }
 
-// -----------------------------------------------------------------------
-// (x-d545) The thread viewport's tab outlives its viewer: a recorded
+// The thread viewport's tab outlives its viewer: a recorded
 // viewer dying in a lone-leaf tab swaps in an idle shell instead of
 // deleting the one tab every reach shares, and the next reach repoints
 // the stand-in in the SAME tab.
-// -----------------------------------------------------------------------
 
 #[test]
 fn attach_agent_anchored_drop_lands_beside_the_anchor_not_the_active_tab() {
@@ -8154,6 +8152,7 @@ pub(super) fn empty_core() -> Core {
         backlog_lanes: Vec::new(),
         backlog_stale: false,
         backlog_holders: HashMap::new(),
+        observers: Default::default(),
         backlog_join: crate::backlog_view::BacklogJoin::default(),
         claim_eligible: HashSet::new(),
         claims: HashMap::new(),

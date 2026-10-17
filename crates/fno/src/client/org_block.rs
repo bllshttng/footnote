@@ -34,6 +34,7 @@ impl View {
         } else {
             crate::org_overlay::MINIMIZED_ROWS
         };
+        let block = block + self.observer_line_count();
         let available = (self.term.0 as usize)
             .saturating_sub(1)
             .saturating_sub(self.bottom_row_is_chrome() as usize);
@@ -57,7 +58,7 @@ impl View {
         let available = term_rows
             .saturating_sub(1)
             .saturating_sub(self.bottom_row_is_chrome() as usize);
-        let lines = if self.org.is_expanded() {
+        let mut lines = if self.org.is_expanded() {
             self.org.expanded_lines(
                 &self.layout.agents,
                 self.sideline_paint_w(),
@@ -67,6 +68,7 @@ impl View {
             self.org
                 .minimized_lines(&self.layout.agents, self.sideline_paint_w())
         };
+        lines.extend(self.observer_lines());
         let available = term_rows
             .saturating_sub(1)
             .saturating_sub(self.bottom_row_is_chrome() as usize);

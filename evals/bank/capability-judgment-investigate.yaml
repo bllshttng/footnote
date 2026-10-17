@@ -1,0 +1,33 @@
+# Capability tier: does /fno:target settle a plan's unknowns before it codes?
+# Specimen: a plan could not rank a cache's callers, guessed one slice, and
+# missed two readers; the node closed on merge with the fault still live.
+# The plan here names one caller in its first route. Two more call the same
+# function under other import forms. Graded by behavior: every caller moves,
+# the dead function is gone, and the plan records the measured caller set
+# and the chosen route.
+id: capability-judgment-investigate
+tier: capability
+prompt: |
+  Execute the plan at evals/fixtures/judgment-investigate/plan.md. Follow
+  the target procedure in this checkout: read skills/target/SKILL.md and
+  skills/target/references/investigate-phase.md first and apply them.
+  Work only inside evals/fixtures/judgment-investigate. Skip init, the
+  node claim, review, the commit, and the PR. Do not push.
+grade:
+  - kind: exit
+    command: "cd evals/fixtures/judgment-investigate && python3 test_callers.py"
+  - kind: exit
+    # The unchecked read is gone at every site, not only the guessed one.
+    command: "grep -rn --include=*.py read_any evals/fixtures/judgment-investigate"
+    expect: 1
+  - kind: exit
+    # No unknown stays open; a deleted line does not settle it (next check).
+    command: "grep -q '^- \\[ \\]' evals/fixtures/judgment-investigate/plan.md"
+    expect: 1
+  - kind: exit
+    # The settled line names the callers the first route missed.
+    command: "grep -Eq '^- \\[x\\].*(heal.*reconcile|reconcile.*heal)' evals/fixtures/judgment-investigate/plan.md"
+  - kind: exit
+    command: "grep -Eq '^chosen: 2' evals/fixtures/judgment-investigate/plan.md"
+timeout_minutes: 20
+tags: [judgment, target]

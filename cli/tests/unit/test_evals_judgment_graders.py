@@ -20,6 +20,22 @@ _BANK = _REPO / "evals" / "bank"
 _FIX = "evals/fixtures/judgment-root-cause"
 _REVIEW = "evals/fixtures/judgment-blast-radius"
 _DESIGN = "evals/fixtures/judgment-design"
+_INV = "evals/fixtures/judgment-investigate"
+_INV_CODE = {
+    f"{_INV}/cache.py": "_store = {}\n\n\ndef write(key, value, etag):\n    _store[key] = (value, etag)\n\n\n"
+    "def read(key, etag):\n    value, stored = _store.get(key, (None, None))\n    return value if stored == etag else None\n",
+    f"{_INV}/status.py": "import cache\n\n\ndef pr_state(n, etag):\n    return cache.read(f\"pr:{n}\", etag)\n",
+    f"{_INV}/heal.py": "from cache import read\n\n\ndef needs_heal(n, etag):\n    return read(f\"pr:{n}\", etag) == \"conflicting\"\n",
+    f"{_INV}/reconcile.py": "import cache as c\n\n\ndef merged(prs, etag):\n"
+    "    return [n for n in prs if c.read(\"pr:%d\" % n, etag) == \"merged\"]\n",
+}
+
+
+def _inv_plan(unknowns: str, chosen: str) -> str:
+    src = (_REPO / _INV / "plan.md").read_text(encoding="utf-8")
+    routes, _, rest = src.partition("## Unknowns\n")
+    done = rest.partition("## Done\n")[2]
+    return f"{routes.rstrip()}\n{chosen}\n\n## Unknowns\n\n{unknowns}\n\n## Done\n{done}"
 
 
 def _ledger(close: str, cancel: str) -> str:
@@ -48,7 +64,15 @@ _HONEST = {
         "review-findings.json": _findings(("nightly.sh", 3), ("README.md", 5)),
     },
     "capability-judgment-design": {
-        f"{_DESIGN}/plan.md": "## Design\n\nKEYS becomes `&[&str]` so a new key carries no count.\n",
+        f"{_DESIGN}/plan.md": "## Routes\n\n1. Bump to `[&str; 5]` - ruled out: the length restates a count.\n"
+        "2. KEYS becomes `&[&str]` so a new key carries no count.\n",
+    },
+    "capability-judgment-investigate": {
+        **_INV_CODE,
+        f"{_INV}/plan.md": _inv_plan(
+            "- [x] which modules call `read_any` - settled: status.py, heal.py (from-import), reconcile.py (alias c)",
+            "chosen: 2 - heal and reconcile also call read_any, which rules out route 1",
+        ),
     },
 }
 _FAKES = {
@@ -74,6 +98,18 @@ _FAKES = {
         "capability-judgment-design",
         {f"{_DESIGN}/plan.md": "## Design\n\nnone: change SUPERVISOR_KEYS to `[&str; 5]` and add the keys.\n"},
     ),
+    "investigate: codes without settling": ("capability-judgment-investigate", dict(_INV_CODE)),
+    "investigate: deletes the unknown": (
+        "capability-judgment-investigate",
+        {**_INV_CODE, f"{_INV}/plan.md": _inv_plan("none: obvious", "chosen: 2 - cleaner")},
+    ),
+    "investigate: the guessed caller only": (
+        "capability-judgment-investigate",
+        {
+            f"{_INV}/status.py": _INV_CODE[f"{_INV}/status.py"],
+            f"{_INV}/plan.md": _inv_plan("- [x] which modules call `read_any` - settled: status.py", "chosen: 1 - one caller"),
+        },
+    ),
     "design: names both shapes": (
         "capability-judgment-design",
         {f"{_DESIGN}/plan.md": "Use `[&str; 5]` now; `&[&str]` later.\n"},
@@ -82,7 +118,7 @@ _FAKES = {
 
 
 def _grade(tmp_path: Path, task_id: str, files: dict[str, str]) -> grading.GradeOutcome:
-    for fixture in (_FIX, _REVIEW, _DESIGN):
+    for fixture in (_FIX, _REVIEW, _DESIGN, _INV):
         shutil.copytree(_REPO / fixture, tmp_path / fixture)
     for rel, content in files.items():
         (tmp_path / rel).write_text(content, encoding="utf-8")

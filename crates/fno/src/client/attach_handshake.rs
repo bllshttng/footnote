@@ -66,6 +66,7 @@ pub(super) async fn read_preamble<R: tokio::io::AsyncRead + Unpin>(
                 agents,
                 focus_node,
                 backlog,
+                observers,
                 ..
             }) => {
                 view.set_layout(LayoutView {
@@ -80,6 +81,7 @@ pub(super) async fn read_preamble<R: tokio::io::AsyncRead + Unpin>(
                 // The launcher's node picker composes over the feed even
                 // though the sidebar no longer renders it.
                 view.backlog = backlog;
+                view.observers = observers;
                 return Ok(stashed_modesync);
             }
             Ok(ServerMsg::ModeSync { bytes }) => stashed_modesync.extend_from_slice(&bytes),

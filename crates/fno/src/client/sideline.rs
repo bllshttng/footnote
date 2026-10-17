@@ -6,6 +6,8 @@
 
 use unicode_width::UnicodeWidthStr;
 
+mod observer_rows;
+
 use super::backlog_style::BLine;
 use super::*;
 

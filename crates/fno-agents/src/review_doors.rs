@@ -43,6 +43,8 @@ fn run_review_level_door(rest: &[String]) -> i32 {
             .is_some_and(|action| matches!(action, "record" | "categories" | "post" | "classify"))
     {
         crate::review_findings::run_findings_door(&rest[1..])
+    } else if rest.first().map(String::as_str) == Some("invocations") {
+        crate::review_invocation::run_invocations_door(&rest[1..])
     } else {
         crate::review_level::run_review_level(rest)
     }

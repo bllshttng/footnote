@@ -82,6 +82,7 @@ mod keeper_adopt;
 pub(crate) mod lifecycle_target;
 mod mouse_route;
 mod notice;
+pub(crate) mod observers;
 mod open_link;
 mod pane_close;
 mod pane_identity;
@@ -580,6 +581,8 @@ pub(crate) enum CoreMsg {
         id: u64,
         request: crate::proto::AgentLaunchRequest,
     },
+    /// (v116) A passive client tags itself as an observer of one pane.
+    Observe(u64, crate::proto::ObserverHello),
     /// The off-loop launcher task's terminal update, routed back so it is
     /// sent from the core loop (which owns `clients`). Trusted origin (a
     /// server task, not a client), so it is NOT in the passive gate - the
@@ -1531,6 +1534,7 @@ pub(crate) struct Core {
     /// Claim holder per in-flight node id, from the reader's sweep;
     /// joined at publish time into card routes / `where_hint`.
     backlog_holders: HashMap<String, String>,
+    observers: observers::Tags,
     /// The graph join from the off-loop graph reader (node prs, driving
     /// sessions, per-session node bindings); joined at layout time into
     /// `AgentRow.pr` (the peek header's `PR #N` label), `AgentRow.pr_session_short`
@@ -7659,24 +7663,7 @@ impl Core {
                     .id;
                 (sid, tid)
             }
-            None if passive => {
-                // Observer, no cwd match: anchor to the first squad's MRU tab,
-                // or a (0,0) sentinel when the session has no squads yet (an
-                // empty session - the browser shows its "no panes" placeholder;
-                // TabId 0 is never minted so it is a safe dangling view).
-                match self.session.squads.first() {
-                    Some(sq) => {
-                        let tid = sq
-                            .tabs
-                            .get(sq.active_tab)
-                            .or_else(|| sq.tabs.first())
-                            .expect("a squad always has a tab")
-                            .id;
-                        (sq.id, tid)
-                    }
-                    None => (0, 0),
-                }
-            }
+            None if passive => observers::passive_anchor(&self.session),
             None => {
                 // Fresh squad: the model builds around a RESERVED pane id and
                 // the client attaches NOW; the shell spawns off the core loop
@@ -8018,7 +8005,7 @@ impl Core {
                 rects.len()
             ));
             let frame_ids: Vec<u64> = if c.passive {
-                all_pane_ids.clone()
+                observers::frame_ids(&self.observers, c.id, &all_pane_ids)
             } else {
                 rects.iter().map(|(pid, _)| *pid).collect()
             };
@@ -8193,6 +8180,7 @@ impl Core {
             backlog_stale: self.backlog_stale,
             sweep_dead_count: self.dead_sweep_count(),
             proto: Some(crate::proto::PROTO_VERSION),
+            observers: self.observer_rows(),
         }
     }
 
@@ -10938,6 +10926,7 @@ impl Core {
                 self.agent_launch(id, request);
                 Flow::Continue
             }
+            CoreMsg::Observe(id, hello) => self.observe(id, hello),
             CoreMsg::AgentLaunchUpdate { id, update, retry } => {
                 self.agent_launch_update(id, update, retry);
                 Flow::Continue

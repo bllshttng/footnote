@@ -1,0 +1,2 @@
+invocations: 1 lost, 0 settled now
+  refused ri-golden-det: no readable head to pin (not a git repo or detached HEAD)

@@ -113,6 +113,25 @@ Only two things leave the machine. The first is the cells of the one shared pane
 
 CAUTION: Masking is best effort. It hides known token shapes: API keys, GitHub and AWS tokens, JWTs and `password=` values. It also hides any run of 40 or more token characters, and the user name in a home path. A secret of an unknown shape, or one that wraps across two rows, can leak. With `--tunnel`, Cloudflare carries the stream and can read the masked text. Quick tunnels are for testing: they have no uptime promise.
 
+## Watch one pane from a terminal
+
+A viewer with ssh access to your machine can watch one pane in a terminal instead of a browser. The viewer runs this on your machine:
+
+```bash
+ssh -t your-host fno mux serve --observe --pane 3 --name teacher
+```
+
+- `--observe` starts a read-only watch. It needs a terminal, so keep the `-t`.
+- `--pane <id>` picks the pane. List panes with `fno mux pane ls`.
+- `--name <label>` sets the name you see. The default is the user name and the ssh client address.
+- `--server <name>` names the mux session.
+
+The watcher sees the same masked cells the browser share sends. Press `q` or Ctrl-C to leave. No key typed in the watch reaches the pane or the agent. A watch cannot send coach or steer notes. Use the browser share for those.
+
+You see every watcher. The pane border shows a count such as `◉ 2` on its top edge. The sideline lists each watcher with the name, the route (`ssh` or `browser`) and the pane. A browser viewer you admit through the share appears the same way. Both kinds of watcher disappear from your view as soon as they leave.
+
+The ssh login is the only check. Anyone who can run `fno` as your user can already attach to the mux, so the watch adds no new door. The same masking limits apply as for the browser share.
+
 ## What you see
 
 The page shows one pane at a time. You choose the pane from a picker at the top. The picker gives each pane its agent name where there is one. It also shows a colored dot for the state of the agent.

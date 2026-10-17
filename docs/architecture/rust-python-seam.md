@@ -250,7 +250,7 @@ The counting rule, in words, so a reader can audit a row without reading the scr
 | 108 | handoff | 153 | 8 | 1/- | 2 | 8 |
 | 109 | cost | 2774 | 8 | 16/1 | 58 | 15 |
 | 110 | harness_names | 76 | 8 | 18/- | 0 | 5 |
-| 111 | review (post-dispositions and the findings classifier ported to Rust and deleted 2026-10, gone on next regen) | 2373 | 8 | 49/- | 31086 | 14 |
+| 111 | review (the review family ported to Rust and deleted 2026-10, gone on next regen) | 2373 | 8 | 49/- | 31086 | 14 |
 | 112 | roles | 2025 | 9 | 0/- | 7 | 6 |
 | 113 | state | 922 | 9 | 12/- | 3396 | 13 |
 | 114 | worktree_paths | 487 | 9 | 17/- | 0 | 11 |

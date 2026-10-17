@@ -14,7 +14,9 @@ In emit order, inside the single plan doc's `## Execution Strategy` waves:
 
 | Header | Required | Purpose |
 |--------|----------|---------|
-| `## Design` | yes (step 2e) | Types, one owner per fact, and seams, written before any task. `none: <why>` when no type or boundary moves |
+| `## Routes` | yes (step 2e) | Two or three candidate routes, each with the measured fact that rules it out. `/target` appends `chosen: <n> - <why>` |
+| `## Unknowns` | yes (step 2e) | `- [ ] <question> - measure: <how>` lines. `/target` settles each before code; `fno do pr create` refuses while one is open |
+| `## Done` | yes (step 2e) | The deliverable as a measured number; its command is a `done_probes:` entry |
 | `## Execution Strategy` | yes | Machine-readable YAML wave manifest for `/execute waves` |
 | `## Wave N: <name>` (one per wave) | optional | Human or legacy wikilink target for a shippable unit |
 | `## Phase Dependencies` | optional | Human-readable phase DAG when YAML alone is insufficient |

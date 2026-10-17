@@ -63,7 +63,7 @@ At the cap the gate stops asking for reviews. The budget discharges the review o
 
 ## When the reviewer never answered: the lost state
 
-A dispatch that was sent and never answered used to read as "never asked": the gate waited on a verdict that would not come. The settle sweep (`fno do review invocations settle`, also run by `fno doctor` and the stop hook) closes that. After `review.invocation_ttl_minutes` (default 15) with no answering attestation, one `review_attestation` row lands with `verdict: fail` and `output_contract: lost`, the invocation id carried in `data`. Coverage at the head reads `uncovered (lost)` - a named refusal the loop's existing uncovered-recovery can act on - instead of an absence with three explanations. The sweep is idempotent by a positive answered marker, so re-running it adds nothing.
+A dispatch that was sent and never answered used to read as "never asked": the gate waited on a verdict that never came. The settle sweep (`fno do review invocations settle`, also run by `fno doctor`) closes that. After `review.invocation_ttl_minutes` (default 15) with no answering attestation, one `review_attestation` row lands with `verdict: fail` and `output_contract: lost`, the invocation id carried in `data`. Coverage at the head reads `uncovered (lost)` - a named refusal the loop's existing uncovered-recovery can act on - instead of an absence with three explanations. The sweep is idempotent by a positive answered marker, so re-running it adds nothing.
 
 ## What this gate claims, and what it does not
 

@@ -1779,14 +1779,16 @@ elif [[ -d "$PLAN_DIR" && -f "$PLAN_DIR/00-INDEX.md" ]]; then
 fi
 
 # -------------------------------------------------------------------
-# Design section (step 2e gate)
+# Routes and unknowns (step 2e gate)
 # -------------------------------------------------------------------
-# Step 2e shapes types and module owners before any task exists. Skill prose
-# alone does not hold it: the design-doc path runs mutate_doc.py straight to
-# an Execution Strategy, so a doc reached ready with no design at all. The
-# marker is the `## Design` heading, which may carry `none: <why>`. A doc
+# Step 2e names candidate routes and the facts nobody measured, and /target
+# settles them before code. Skill prose alone does not hold it: the design-doc
+# path runs mutate_doc.py straight to an Execution Strategy. The markers are
+# the `## Routes` and `## Unknowns` headings. A plan dated on or before the
+# routes gate may still carry the older `## Design` section instead. A doc
 # still at status: design has not been blueprinted yet, so the gate waits.
 design_gate_date="2026-10-16"
+routes_gate_date="2026-10-17"
 check_design_file() {
     local file="$1"
     local label="$2"
@@ -1794,17 +1796,23 @@ check_design_file() {
     if [[ "$(_plan_rung "$file")" == "design" ]]; then
         return 0
     fi
-    if grep -qx '## Design' "$file"; then
-        ok "$label: ## Design present (step 2e gate)"
+    if grep -qx '## Routes' "$file" && grep -qx '## Unknowns' "$file"; then
+        ok "$label: ## Routes and ## Unknowns present (step 2e gate)"
         return 0
     fi
-    # Only a plan dated after the gate is refused. An undated plan warns: this
+    # Only a plan dated after a gate is refused. An undated plan warns: this
     # gate does not own the missing date, and the dating gates already report it.
     created=$(_plan_created_date "$file")
-    if [[ "$created" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ && "$created" > "$design_gate_date" ]]; then
-        error "$label: no ## Design section - step 2e writes types, one owner per fact, seams, and the module it extends before any task, or the single line none: <why> (see skills/blueprint/SKILL.md step 2e)"
+    if [[ ! "$created" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+        warn "$label: no ## Routes and ## Unknowns sections (plan carries no date); backfill them when the plan is next amended"
+    elif [[ "$created" > "$routes_gate_date" ]]; then
+        error "$label: no ## Routes and ## Unknowns sections - step 2e names two or three candidate routes and each unmeasured fact as '- [ ] <question> - measure: <how>' before any task (see skills/blueprint/SKILL.md step 2e)"
+    elif grep -qx '## Design' "$file"; then
+        ok "$label: ## Design present (plan predates the routes gate)"
+    elif [[ "$created" > "$design_gate_date" ]]; then
+        error "$label: no ## Routes and ## Unknowns sections - step 2e names candidate routes and unmeasured facts before any task (see skills/blueprint/SKILL.md step 2e)"
     else
-        warn "$label: no ## Design section (plan predates the step 2e gate or carries no date); backfill one when the plan is next amended"
+        warn "$label: no ## Routes and ## Unknowns sections (plan predates the step 2e gate); backfill them when the plan is next amended"
     fi
 }
 

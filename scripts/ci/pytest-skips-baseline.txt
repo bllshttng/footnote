@@ -124,7 +124,6 @@ cli/tests/relay/test_roundtrip.py::test_live_deliver_via_daemon_worker::pytest.s
 cli/tests/relay/test_roundtrip.py::test_live_deliver_via_daemon_worker::pytest.skip  # on main before this ratchet
 cli/tests/scoreboard/test_scoreboard.py::test_live_ledger_shape_folds_without_crash::pytest.skip  # on main before this ratchet
 cli/tests/test_autonomy_status.py::test_name_codes_check_prints_rows_and_marker::pytest.skip  # on main before this ratchet
-cli/tests/test_review_locking.py::<module>::mark.skipif  # on main before this ratchet
 cli/tests/unit/test_agent_naming.py::test_max_len_matches_the_daemon_contract::pytest.skip  # on main before this ratchet
 cli/tests/unit/test_archive_reads.py::_native_backlog::pytest.skip  # on main before this ratchet
 cli/tests/unit/test_backlog_single_flight.py::iso::pytest.skip  # on main before this ratchet

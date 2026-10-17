@@ -37,7 +37,7 @@ use tokio::net::unix::OwnedReadHalf;
 use tokio::net::{TcpListener, UnixStream};
 use tokio::sync::{broadcast, oneshot};
 
-use crate::proto::{self, ClientMsg, ServerMsg, BUILD_VERSION, PROTO_VERSION};
+use crate::proto::{self, ClientMsg, ObserverHello, ServerMsg, BUILD_VERSION, PROTO_VERSION};
 
 /// The served page, vendored inline (no CDN) so the strict CSP holds offline.
 pub(crate) const PAGE: &str = include_str!("web_page.html");
@@ -831,7 +831,7 @@ async fn upstream_loop(
     let mut ready_tx = Some(ready_tx);
     let mut backoff = Backoff::new();
     loop {
-        match connect_attach(&socket).await {
+        match connect_attach(&socket, None).await {
             Ok((reader, preamble)) => {
                 let started = Instant::now();
                 if let Some(rt) = ready_tx.take() {
@@ -870,10 +870,14 @@ async fn upstream_loop(
     }
 }
 
-/// Connect, send the observer `Attach`, relinquish the write half, and read the
-/// first reply. A `Bye` here is a refused/skewed attach (`Err`); anything else
-/// means the attach took, and the message is returned as preamble to forward.
-pub(crate) async fn connect_attach(socket: &Path) -> Result<(OwnedReadHalf, ServerMsg), String> {
+/// Connect, send the observer `Attach` (and the observer's own `hello` when it
+/// names itself), relinquish the write half, and read the first reply. A `Bye`
+/// here is a refused/skewed attach (`Err`); anything else means the attach
+/// took, and the message is returned as preamble to forward.
+pub(crate) async fn connect_attach(
+    socket: &Path,
+    hello: Option<ObserverHello>,
+) -> Result<(OwnedReadHalf, ServerMsg), String> {
     let stream = tokio::time::timeout(UPSTREAM_CONNECT_TIMEOUT, UnixStream::connect(socket))
         .await
         .map_err(|_| {
@@ -907,6 +911,11 @@ pub(crate) async fn connect_attach(socket: &Path) -> Result<(OwnedReadHalf, Serv
     )
     .await
     .map_err(|e| format!("attach write failed: {e}"))?;
+    if let Some(hello) = hello {
+        proto::write_msg(&mut writer, &ClientMsg::Observe(hello))
+            .await
+            .map_err(|e| format!("observer hello write failed: {e}"))?;
+    }
     // READ-ONLY (Locked Decision 5): drop all write ability. `forget()` releases
     // the write half WITHOUT the shutdown-on-drop that would half-close the
     // socket and make the server detach us; after this there is no handle that

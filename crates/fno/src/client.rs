@@ -1037,6 +1037,7 @@ pub(crate) struct View {
     /// commands the announcement predates are refused client-side rather
     /// than sent into an unknown-variant read failure.
     server_proto: Option<u32>,
+    observers: Vec<crate::proto::ObserverRow>,
     /// The backlog board overlay, when open (one at a time).
     backlog_board: Option<backlog_board::BoardView>,
     messages_board: Option<messages_view::MessagesBoard>,
@@ -2058,6 +2059,7 @@ impl View {
             pending_ground: None,
             backlog: Vec::new(),
             server_proto: None,
+            observers: Vec::new(),
             backlog_board: None,
             messages_board: None,
             bell: bell::Panel::initial(),
@@ -7697,10 +7699,8 @@ async fn attach_and_run(
                         }
                     }
                 }
-                Ok(ServerMsg::Layout { squads, active_squad, panes, focus, area, agents, focus_node, backlog, proto, .. }) => {
-                    view.set_layout(LayoutView { squads, active_squad, panes, focus, area, agents, focus_node });
-                    view.backlog = backlog;
-                    view.server_proto = proto;
+                Ok(ServerMsg::Layout { squads, active_squad, panes, focus, area, agents, focus_node, backlog, proto, observers, .. }) => {
+                    view.apply_layout(LayoutView { squads, active_squad, panes, focus, area, agents, focus_node }, backlog, proto, observers);
                     // a scrape tick may have removed the peeked row.
                     // Re-anchor to an adjacent agent row (fetch its transcript)
                     // or close - never a stale render / panic (AC1-EDGE).

@@ -1,0 +1,9 @@
+{
+ "args_raw": "https://github.com/o/r/pull/77/",
+ "flags": [],
+ "level": "unset",
+ "level_source": "fallback",
+ "pr_number": 77,
+ "target": "https://github.com/o/r/pull/77/",
+ "verb": "/review"
+}

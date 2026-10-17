@@ -54,15 +54,3 @@ do_app.add_typer(resume_app, name="resume")
 do_app.add_typer(state_app, name="state")
 do_app.add_typer(target_app, name="target")
 do_app.add_typer(think_app, name="think")
-
-
-def _register_review() -> None:
-    # The review root (``fno do review <tail>`` with no leaf, and the root
-    # alias) is claimed at the Rust front door and never reaches Python;
-    # these registrations keep the leaves reachable as subcommands.
-    from fno.review.cli import review_app
-
-    do_app.add_typer(review_app, name="review")
-
-
-_register_review()

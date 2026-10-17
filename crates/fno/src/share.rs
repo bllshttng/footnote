@@ -16,8 +16,10 @@
 //!   the driver to type `y <n>`. It then goes as mail from `observer:<name>`,
 //!   so the driver's agent processes it on the driver's account.
 //!
-//! No viewer byte reaches a pty: watch and coach never touch the mux socket,
-//! and steer reaches the agent only through the mail verb after consent.
+//! No viewer byte reaches a pty: watch and coach carry nothing from a viewer to
+//! the mux socket, and steer reaches the agent only through the mail verb after
+//! consent. Each admitted viewer also holds a presence-only attach whose one
+//! message is the viewer's cleaned name, so the mux can show who watches.
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, IsTerminal, Write};
@@ -37,8 +39,9 @@ use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::mux_cli::control_roundtrip;
-use crate::proto::{self, ControlVerb, PaneInfo, ServerMsg};
+use crate::proto::{self, ControlVerb, Frame, ObserverHello, ObserverVia, PaneInfo, ServerMsg};
 use crate::server::agent_actions::{run_mail_send, sanitize_mail_text};
+use crate::server::observers::clean_label;
 use crate::{redact, web};
 
 /// Default share port: `serve --web` holds 8722 and its attention listener 8724.
@@ -49,8 +52,6 @@ const HISTORY_LINES: u16 = 500;
 const KNOCK_WINDOW: Duration = Duration::from_secs(30);
 /// Knocks that may wait for the driver at once.
 const MAX_WAITING: usize = 3;
-/// Longest display name, after filtering.
-const MAX_NAME: usize = 40;
 /// A wrong-link knock prints at most once per this gap, so a scan cannot
 /// flood the driver's panel.
 const REFUSAL_PRINT_GAP: Duration = Duration::from_secs(10);
@@ -82,6 +83,18 @@ pub struct ShareArgs {
 /// Every other message, `Layout` included, is dropped: nothing about the rest
 /// of the session leaves the machine.
 pub(crate) fn share_frame(msg: ServerMsg, pane: u64) -> Option<String> {
+    let frame = masked_pane_frame(msg, pane)?;
+    serde_json::to_string(&ServerMsg::Frame {
+        pane_id: pane,
+        frame,
+    })
+    .ok()
+}
+
+/// The masked frame when `msg` is a good frame of pane `pane`, else `None`.
+/// The one place a pane's cells are made safe to leave the machine, shared by
+/// the browser share and the ssh observer.
+pub(crate) fn masked_pane_frame(msg: ServerMsg, pane: u64) -> Option<Frame> {
     let ServerMsg::Frame { pane_id, mut frame } = msg else {
         return None;
     };
@@ -90,13 +103,13 @@ pub(crate) fn share_frame(msg: ServerMsg, pane: u64) -> Option<String> {
     }
     frame.cells.iter_mut().for_each(crate::band_remap::remap);
     redact::redact_frame(&mut frame);
-    serde_json::to_string(&ServerMsg::Frame { pane_id, frame }).ok()
+    Some(frame)
 }
 
 /// What makes a pane the same pane across a server restart, where pane ids
 /// start over. The child pid comes first because it is set at spawn and never
 /// changes; a harness session id can appear later, when the agent registers.
-fn pane_identity(p: &PaneInfo) -> String {
+pub(crate) fn pane_identity(p: &PaneInfo) -> String {
     p.child_pid
         .map(|pid| format!("pid:{pid}"))
         .or_else(|| p.fno_id.clone())
@@ -115,17 +128,6 @@ pub(crate) fn pane_still_shared(panes: &[PaneInfo], pane: u64, identity: &str) -
 fn history_above_grid(text: &str, rows: usize) -> String {
     let lines: Vec<&str> = text.lines().collect();
     lines[..lines.len().saturating_sub(rows)].join("\n")
-}
-
-/// A display name reduced to `[A-Za-z0-9 ._-]`, trimmed, at most 40 chars.
-/// It is a label the driver reads, never an identity.
-fn clean_name(name: &str) -> String {
-    let kept: String = name
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '.' | '_' | '-'))
-        .take(MAX_NAME)
-        .collect();
-    kept.trim().to_string()
 }
 
 fn share_line(body: Value) -> String {
@@ -251,7 +253,7 @@ impl Viewers {
             }
             return (Knock::Refused("invalid link"), effects);
         }
-        let name = clean_name(name);
+        let name = clean_label(name);
         if name.is_empty() {
             return (Knock::Refused("a display name is needed"), Vec::new());
         }
@@ -515,7 +517,7 @@ fn run_effects(ctx: &Ctx, hub: &mut Hub, effects: Vec<Effect>) {
     }
 }
 
-fn list_panes(socket: &Path, session: &str) -> Result<Vec<PaneInfo>, String> {
+pub(crate) fn list_panes(socket: &Path, session: &str) -> Result<Vec<PaneInfo>, String> {
     match control_roundtrip(socket, session, ControlVerb::PaneLs) {
         Ok(ServerMsg::PaneList { panes }) => Ok(panes),
         Ok(ServerMsg::Err { msg, .. }) => Err(msg),
@@ -563,6 +565,23 @@ async fn admit_flow(ctx: Ctx, out: mpsc::UnboundedSender<Out>) {
     };
     let _ = out.send(Out::Text(line));
     let _ = out.send(Out::Live);
+}
+
+/// One presence-only attach per admitted viewer. The server lists the viewer
+/// on the shared pane (border count, sideline) for as long as this task holds
+/// the socket, and `ws_conn` aborts it when the viewer goes. A ticket the
+/// server refuses costs the viewer nothing but the badge.
+async fn presence_ticket(ctx: Ctx, name: String) {
+    let hello = ObserverHello {
+        name,
+        pane: ctx.pane,
+        via: ObserverVia::Share,
+        frames: false,
+    };
+    match web::connect_attach(&ctx.socket, Some(hello)).await {
+        Ok((mut reader, _)) => while proto::read_msg::<_, ServerMsg>(&mut reader).await.is_ok() {},
+        Err(e) => println!("this viewer will not show on the mux: {e}"),
+    }
 }
 
 /// An approved steer: resolve the pane's agent and mail it from the viewer.
@@ -630,7 +649,7 @@ async fn upstream(
     let mut ready = Some(ready);
     let mut backoff = web::Backoff::new();
     loop {
-        match web::connect_attach(&ctx.socket).await {
+        match web::connect_attach(&ctx.socket, None).await {
             Ok((mut reader, preamble)) => {
                 let started = Instant::now();
                 match list_panes_async(&ctx).await {
@@ -797,6 +816,7 @@ async fn ws_conn(mut socket: WebSocket, ctx: Ctx) {
     // A waiting socket never subscribes to the frame broadcast: it gets the
     // live stream only after `Out::Live`, which only admission sends.
     let mut live: Option<broadcast::Receiver<String>> = None;
+    let mut ticket: Option<tokio::task::JoinHandle<()>> = None;
     loop {
         tokio::select! {
             out = out_rx.recv() => match out {
@@ -809,6 +829,9 @@ async fn ws_conn(mut socket: WebSocket, ctx: Ctx) {
                     // Subscribe before reading the snapshot, so no frame falls
                     // in the gap between them.
                     live = Some(ctx.tx.subscribe());
+                    ticket.get_or_insert_with(|| {
+                        tokio::spawn(presence_ticket(ctx.clone(), name.clone()))
+                    });
                     let preamble = {
                         let s = ctx.snap.lock().unwrap();
                         let mut p = vec![web::bridge_status(if s.up { "connected" } else { "disconnected" })];
@@ -840,6 +863,9 @@ async fn ws_conn(mut socket: WebSocket, ctx: Ctx) {
                 Some(Ok(_)) => {}
             },
         }
+    }
+    if let Some(ticket) = ticket {
+        ticket.abort();
     }
     // A connection the hub still holds ended on the viewer's side. One the hub
     // already dropped was closed by the driver (deny) or by the share ending,

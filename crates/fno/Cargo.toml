@@ -48,6 +48,9 @@ libc = "0.2"
 portable-pty = "0.9"
 # `pane wait --pattern RE`: regex over a pane's visible grid (script API).
 regex = "1"
+# The review invocation parser's shlex.split port (one owner in
+# review_invocation.rs). Already resolved through the lockfile.
+shlex = "2.0.1"
 # store_client.rs hashes long graph paths for the fallback keeper-socket
 # name; the same crate version fno-agents pins, so one build stack.
 sha2 = "0.10"

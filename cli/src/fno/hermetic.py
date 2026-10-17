@@ -95,6 +95,7 @@ _AMBIENT_NAMES: tuple[str, ...] = (
     "GROK_HOME",  # grok's session store root; the same category pi once read a store-root var for
     "GROK_SESSION_ID",  # a live grok session marker; identity, not test input
     "LOGNAME",  # login identity; the mail sender fallback reads it, and a suite must not inherit the developer's
+    "SSH_CONNECTION",  # the ssh client address the observer names a watcher from; same identity category as LOGNAME
     "HOST",  # the machine name the join profile header records; same identity category as LOGNAME, and host() falls back to `hostname` when it is scrubbed
     "CLAUDE_CLI",
     "CLI",  # legacy harness selector; CLI=codex flips harness resolution

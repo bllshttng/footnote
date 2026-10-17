@@ -49,7 +49,7 @@ Each gate loads only when its trigger fires. The bodies (with verbatim scripts) 
 | Blueprint Provenance Stamp | always, after `$NODE_ID` is minted (tiny, best-effort) |
 | PRODUCT.md Prereq Check | the plan locks `executor: impeccable` (plan-level or per-task) |
 | impeccable_stages Pin Syntax | a task pins specific `/impeccable` stages |
-| done_probes | the deliverable is recurring / operational (a scheduler, watcher, daemon, cadence) - MANDATORY then, omit otherwise |
+| done_probes | every code plan: the command that measures the `## Done` number (step 2e). A recurring or operational deliverable (a scheduler, watcher, daemon, cadence) also probes that it keeps running |
 | Join posture | the plan carries an `## Execution Strategy` - step 3, after enrichment, before validation |
 | Collision check | always, unless `no-collision-check` (step 3a) |
 | Cross-project peer heads-up | a `peers` block exists and a Files-to-Modify row matches a peer surface (step 3a-bis) |
@@ -92,7 +92,7 @@ A batched dispatch can run this skill up to three times in sequence. Each run st
 
 ## Amend (a plan that is already ready)
 
-An amend is not a rewrite. Skip discovery, the five questions, answerer enumeration, the design step, the code index audit, the collision check and intake. They ran at write time. One seated worker spent 48 minutes on an amend that re-ran them before its first source edit. A ruling that moves a type or a module owner is not an amend: re-run step 2e for that part.
+An amend is not a rewrite. Skip discovery, the five questions, answerer enumeration, the design step, the code index audit, the collision check and intake. They ran at write time. One seated worker spent 48 minutes on an amend that re-ran them before its first source edit. A ruling that adds a route or an unknown is not an amend: re-run step 2e for that part.
 
 1. A seat order that says "build wave one, then re-blueprint" means the first source edit comes first. Make it, then amend between waves. A seated worker never amends before its first edit.
 2. Read the live rulings once: `fno backlog decisions <node> --state live --json`. Add every missing `decisions_acknowledged` entry in one edit. Change only the tasks a ruling names.
@@ -211,14 +211,13 @@ fi
 
    Silence is not an outcome. A plan that ignores its sibling is the failure this gate exists to prevent. Do not build a second consolidator here: `fno backlog groom` already owns the daily levers-only pass and its allowlist already carries `supersede`. This gate is the pre-write half only.
 
-2e. **Shape the design before the tasks** - every plan, after 2d and before any task or wave exists. Tasks cut along the module lines you draw here. Cut tasks first and they draw the module lines for you, usually badly. Write a `## Design` section with four parts:
+2e. **Name the routes and the unknowns before the tasks** - every plan, after 2d and before any task or wave exists. A blueprint does not tell the worker how to build it. It names the routes the worker can take and the facts nobody has measured yet. `/target` measures those facts before it writes code. Two misses had one shape. One plan said to forward a call to Python, and the code went through the front door. Another plan guessed which callers read a cache and missed two. Each plan settled a fact it never measured. Write three sections:
 
-   - **Types.** List each data shape the plan adds or changes. Give its fields, its states, and which states are illegal. Make an illegal state impossible to write where the language allows. One enum beats two booleans that must agree. One optional field beats two fields that must both be set or both be empty. A type never restates a count its data already holds. A fixed array length or a hand-kept total breaks on every add.
-   - **Owners.** One module owns each fact: one writer, and every other module reads through it. Take the count from 2b-bis. Two writers of one fact is a design defect. Fix it here, not in a later PR.
-   - **Seams.** For each touched module, name what callers see and what stays hidden. Callers see functions or verbs, errors, and ordering rules. A caller that must know an internal detail means the seam is in the wrong place.
-   - **Extends.** The existing module this design grows, from the fifth question in 2a-bis. A new module needs one line saying why no existing one fits.
+   - **`## Routes`.** Two or three candidate routes, numbered. Each route names what rules it out: the measured fact that kills it. Rule out on sight a route that lets code write an illegal state. Do the same for a route that gives one fact two writers. Do not pick one. `/target` appends the `chosen: <n> - <why>` line after it measures. When only one route is honest, write it and add `only route: <why no other exists>`.
+   - **`## Unknowns`.** Write one line per fact the plan depends on but did not measure. The form is `- [ ] <question> - measure: <how>`. Examples are the callers of a symbol, the path the code takes, a count, and a cause. A fact you measured in discovery or 2b-bis is not an unknown. Cite it in Context with its source. When every fact is measured, write `none: <why>` instead. `fno do pr create` refuses (exit 6) while one `- [ ]` line stays open.
+   - **`## Done`.** State the deliverable as a measured number, and give the command that measures it. Declare that command in frontmatter `done_probes:` so the stop gate reads it, under the probe rules in [the done_probes gate](references/blueprint-gates.md).
 
-   Then cut the tasks. Each task in the Execution Strategy names the one module it owns. A task that edits two owners' modules is two tasks or a wrong boundary. A plan that changes no type and no module boundary (prose, docs, config values only) writes `## Design` with the single line `none: <why>`. A supplied design doc whose `## Architecture` already answers the four parts cites it under `## Design` and does not repeat it.
+   Then cut the tasks. A task names the files it expects to touch and the unknown it depends on, never the route. A plan that changes prose, docs or config values only writes one route and `none:` under Unknowns. A supplied design doc whose `## Architecture` already lists routes cites it under `## Routes` and does not repeat it.
 
 3. **Write** the plan.
 
@@ -452,8 +451,15 @@ kill_criteria:
 ## Context
 [Problem, root cause, what we found]
 
-## Design
-[Step 2e: types and their illegal states, one owner per fact, seams, the module it extends. Or `none: <why>`.]
+## Routes
+1. [Candidate route] - ruled out by: [the measured fact that kills it]
+2. [Candidate route] - ruled out by: [...]
+
+## Unknowns
+- [ ] [Question the plan depends on] - measure: [command or read that settles it]
+
+## Done
+[The measured number and the command that measures it; the same command sits in `done_probes:`.]
 
 ## Changes
 
@@ -477,7 +483,7 @@ kill_criteria:
 1. [Concrete runnable check]
 ```
 
-**Required sections:** Context, Design, Changes, Files to Modify, Verification.
+**Required sections:** Context, Routes, Unknowns, Done, Changes, Files to Modify, Verification.
 **Optional sections:** Patterns to Reuse (omit if no relevant patterns exist).
 
 ### Writing Principles
@@ -557,7 +563,7 @@ When the input to `/blueprint` is a path to an existing design doc (produced by 
 ```
 1. Read design doc + frontmatter
 1b. Ask the code index: run the creation path's step 2-index against the doc's claims and write its `code_index:` block and `## Existence audit` table into the doc
-1c. Shape the design: run the creation path's step 2e. Cite the doc's `## Architecture` when it answers the four parts, else write `## Design`, before any task exists
+1c. Name the routes and unknowns: run the creation path's step 2e. Write `## Routes`, `## Unknowns` and `## Done` before any task exists
 2. Validate: status must be "design" (or "ready" if `rewrite` passed)
 3. Detect codebase state (--mode greenfield|brownfield skips this):
    - Read ## Architecture section, extract file path mentions

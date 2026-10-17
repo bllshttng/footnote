@@ -440,6 +440,7 @@ pub mod review_capability;
 pub mod review_doors;
 pub mod review_findings;
 pub mod review_freshness;
+pub mod review_invocation;
 pub mod review_level;
 pub mod review_policy;
 pub mod review_summary;
@@ -2001,6 +2002,12 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // Daemon startup scope declaration: sandbox home vs the operator's
     // shared home. Fleet gating and board routing key off it.
     "daemon_fleet_scope",
+    // The invocations door's attestation leg: the head-pinned verdict the
+    // loop gate reads, settled rows included. The Python hook and
+    // emit-attestation.sh write the same kind at the same boundary, so it is
+    // dual_owner_kinds in check-event-schema-parity.sh (review_invocation
+    // above is the door's other leg).
+    "review_attestation",
     // The mail style gate's refusal record: one event per refusal so the
     // retry rate is a query over events.jsonl. The raw-send lane emits it
     // from Rust; the Python front still runs the same gate on the non-raw

@@ -98,6 +98,7 @@ NATIVE_SERVED_LEAVES = {
     "do review resolve-level",
     "do review post-dispositions",
     "do review classify",
+    "do review invocations",
 }
 
 # Two people hit these gates cold within an hour and both reverse-engineered the

@@ -1,0 +1,11 @@
+[
+ {
+  "head_sha": "<head>",
+  "invocation_id": "ri-golden-lost",
+  "output_contract": "lost",
+  "reviewer": "code-review",
+  "session_id": "settle",
+  "settle_note": "invocation lost: sent, delivered, and never answered; emitted by the settle sweep",
+  "verdict": "fail"
+ }
+]

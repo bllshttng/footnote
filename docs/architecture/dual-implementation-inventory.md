@@ -71,6 +71,34 @@ All eight are finished ports. Their oracle legs are gone. Each converted case no
 
 **The finding classifier and the disposition comment.** Dual, disposition dual-logic, RETIRED by the review-port wave 4 (2026-10). The three former legs: the classifier (`cli/src/fno/review/findings.py`, whole), the record builder `build_emit_record`, and the round-comment renderer with the `post-dispositions` leaf (both in `cli/src/fno/review/cli.py`). The ONE owner is `crates/fno-agents/src/review_findings.rs` behind the `review-level findings` door (`record`, `categories`, `post`). The front door claims the leaf, and `classify` plus the coverage gate read the record through `fno.rust_binary`. The shipped allowlist lives once (`DEFAULT_NONBLOCKING_CATEGORIES`) and the disposition gate reads it. The branch-to-PR read is the shared `resolve_current_pr`, and the slug reason is Python's own sentence now, not a Rust substitution. Characterized by the goldens under `crates/fno-agents/tests/golden/review_findings/` (`review_findings_parity.rs`), captured from the Python leg before its deletion. One deliberate departure, recorded. The comments read walks every page (`--paginate`), where the Python leg read one page. A PR with over 100 comments no longer gets a duplicate round comment. The 3b wave (2026-10-15) finished the leaf. The classify wrapper, the attest writer, and the `--attest` flag retired. The classify action joined the door, and the shell emitter became the row's one writer.
 
+**The review invocation parser, sidecar and mint.** Dual, disposition dual-logic, RETIRED by the review-port wave 5 (2026-10).
+
+The four former legs: `cli/src/fno/review/invocation.py`, whole, plus its callers in `cli/src/fno/mail/cli.py`, `cli/src/fno/doctor.py` and `hooks/review-hold.sh`.
+
+A second leg was the codex copy in `crates/fno-agents/src/codex_inject.rs`: the private mint, the sidecar reader and writer, and the hand-rolled flag table.
+
+The third leg was the mux verb parse (`review_invocation_command` in `crates/fno/src/review_invocation.rs`).
+
+The fourth was the shell id fallback in `hooks/review-hold.sh`, kept as the version-skew degrade, never an owner.
+
+The ONE owner is `fno::review_invocation`.
+
+It owns `parse_review_invocation`, `canonical_flag`, `VERIFY_FIXES`, `mint_invocation_id`, `pending_invocation_path`, `adopt_pending_invocation` and `write_pending_invocation`.
+
+The `review-level invocations` door serves `parse`, `join`, `reserve`, `emit` and `settle`.
+
+Every caller reads that door now.
+
+RECORDED behavior change on the codex leg.
+
+Its hand-rolled table read any `--` token as a flag. It knew no em-dash or bare-word alias.
+
+The shared parser's table governs it now.
+
+A bare `fix` (or `fix` led by one U+2014 character) records as `--fix` on codex too.
+
+An unknown `--` token is preserved verbatim.
+
 **The gate config gap.** Dual, disposition dual-logic, LIVE. The producer and the Python coverage gate extend the harmless-category allowlist from `review.nonblocking_categories`, the gate reading it through the categories door since the wave-4 port. The Rust disposition gate (`disposition_gate.rs` `gate_finding_blocks`) reads the shipped list only and never the key. A project configuring an extra harmless category gets a producer that counts it nonblocking and a Rust gate that still blocks on it. Loosening a merge gate is not a port. The gap closes with the coverage-gate family's own port.
 
 **The --verify-fixes round.** Dual, disposition dual-logic, live, port owed (2026-10-15). Two answerers compute the round a fix-verification declares: `declared_round` in `crates/fno-agents/src/review_summary.rs` and `scoped_verify_round` in `cli/src/fno/pr/_review_hold.py` behind `fno do pr review-hold round`. The classify port deleted the attest path that was `declared_round`'s last production caller. The shell emitter reads `fno do pr review-hold round` instead. The Rust leg now answers tests only until the pr family ports the review-hold verb and folds the two onto one leg. Both floor at 1 over rounds-since-last-pass, but their journal reads differ: the Rust leg reads the events file, the Python leg the two coverage mirrors. Recorded, not extended: this port adds no third reader.
