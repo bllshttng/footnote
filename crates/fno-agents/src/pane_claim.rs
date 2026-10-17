@@ -9,7 +9,7 @@
 //! that), its own parent must be a real process (not a detached shared host,
 //! ppid 0 or 1), and no ancestor above that may itself be a harness.
 
-use crate::census::ProcRow;
+use crate::census::{descendants, ProcRow};
 use crate::spawn_context;
 use std::collections::BTreeMap;
 
@@ -113,6 +113,65 @@ pub fn ambient() -> Option<PaneClaim> {
     let table = spawn_context::ancestry_table();
     let start_pid = unsafe { libc::getppid() } as u32;
     from_parts(|k| std::env::var(k).ok(), &table, start_pid)
+}
+
+/// One keeper-hosted pane's observation: the mux session and pane id a bind
+/// would name, the keeper's child pid (the root of that pane's process
+/// tree), and the pane's working directory in both recorded forms (the
+/// shell's PWD spelling and the resolved one, `/tmp` vs `/private/tmp`;
+/// either may be empty).
+pub struct PaneRow {
+    pub session: String,
+    pub pane_id: u64,
+    pub child_pid: u32,
+    pub cwd: String,
+    pub alt_cwd: String,
+}
+
+/// True when `root` itself or any strict descendant of it is an opencode TUI
+/// client: a process the harness-name reader calls opencode whose command
+/// line is not the shared `serve` daemon (someone may run `opencode serve`
+/// inside a pane; a server is not a TUI).
+fn subtree_has_opencode_tui(table: &[ProcRow], root: u32) -> bool {
+    let mut pids = vec![root];
+    pids.extend(descendants(table, root));
+    pids.iter().any(|pid| {
+        table.iter().find(|row| row.pid == *pid).is_some_and(|row| {
+            spawn_context::harness_name_of_command(&row.command) == Some("opencode")
+                && !row.command.contains(" serve")
+        })
+    })
+}
+
+/// The pane-side decision, over injected keeper rows and a census table.
+/// `from_parts` walks UP from the reporter, which can never work for a
+/// harness whose plugin reports from a per-machine daemon: opencode's
+/// nearest harness ancestor is `opencode.exe serve --service`, parented by
+/// pid 1. This walks DOWN instead. The panes whose subtree runs an opencode
+/// TUI and whose recorded working directory holds `report_cwd` are
+/// candidates; exactly one binds. Zero and two-or-more refuse, because a
+/// silent guess would point the row at the wrong pane. A dead `child_pid`
+/// (absent from the table) is never a candidate.
+pub fn from_pane_side(panes: &[PaneRow], table: &[ProcRow], report_cwd: &str) -> Option<PaneClaim> {
+    let report_cwd = report_cwd.trim();
+    if report_cwd.is_empty() {
+        return None;
+    }
+    let candidates: Vec<&PaneRow> = panes
+        .iter()
+        .filter(|pane| {
+            (pane.cwd == report_cwd || pane.alt_cwd == report_cwd)
+                && subtree_has_opencode_tui(table, pane.child_pid)
+        })
+        .collect();
+    if candidates.len() != 1 {
+        return None;
+    }
+    let pane = candidates[0];
+    Some(PaneClaim {
+        session: pane.session.clone(),
+        pane_id: pane.pane_id,
+    })
 }
 
 /// Binds `entries[idx]` to `claim`: sets its `mux` and clears `short_id` (the
@@ -261,5 +320,105 @@ mod tests {
         ]);
         let get = env(&[("FNO_PANE", "74"), ("FNO_SERVER", "main")]);
         assert_eq!(from_parts(get, &table, 40), None);
+    }
+
+    fn rows(v: &[(u32, u32, &str)]) -> Vec<ProcRow> {
+        v.iter()
+            .map(|&(pid, ppid, command)| crate::census::test_proc_row(pid, ppid, command))
+            .collect()
+    }
+
+    fn pane(session: &str, pane_id: u64, child: u32, cwd: &str) -> PaneRow {
+        PaneRow {
+            session: session.into(),
+            pane_id,
+            child_pid: child,
+            cwd: cwd.into(),
+            alt_cwd: String::new(),
+        }
+    }
+
+    /// AC1-HP: one pane whose subtree holds an opencode TUI at the report's
+    /// cwd returns a claim naming that pane.
+    #[test]
+    fn pane_side_happy_path_binds() {
+        let table = rows(&[
+            (1, 0, "/sbin/launchd"),
+            (100, 1, "fno-agents-worker --pane"),
+            (110, 100, "/bin/zsh -il"),
+            (200, 110, "opencode.exe"),
+        ]);
+        let panes = vec![pane("main", 3, 100, "/w")];
+        assert_eq!(
+            from_pane_side(&panes, &table, "/w"),
+            Some(PaneClaim {
+                session: "main".into(),
+                pane_id: 3
+            })
+        );
+    }
+
+    /// The TUI may be the pane's direct child (`mux pane run -- opencode`).
+    #[test]
+    fn pane_side_tui_as_direct_child_binds() {
+        let table = rows(&[(1, 0, "/sbin/launchd"), (100, 1, "opencode.exe")]);
+        let panes = vec![pane("main", 3, 100, "/w")];
+        assert!(from_pane_side(&panes, &table, "/w").is_some());
+    }
+
+    /// Each candidate-filter half refuses alone: the pane's recorded cwd
+    /// must hold the report's cwd, and the subtree must actually run an
+    /// opencode TUI (a claude pane in the same directory never wins).
+    #[test]
+    fn pane_side_filter_halves_refuse() {
+        let tui_table = rows(&[
+            (1, 0, "/sbin/launchd"),
+            (100, 1, "fno-agents-worker --pane"),
+            (110, 100, "/bin/zsh -il"),
+            (200, 110, "opencode.exe"),
+        ]);
+        let panes = vec![pane("main", 3, 100, "/w")];
+        assert_eq!(from_pane_side(&panes, &tui_table, "/other"), None);
+        let claude_table = rows(&[
+            (1, 0, "/sbin/launchd"),
+            (100, 1, "fno-agents-worker --pane"),
+            (110, 100, "/bin/zsh -il"),
+            (210, 110, "claude"),
+        ]);
+        assert_eq!(from_pane_side(&panes, &claude_table, "/w"), None);
+    }
+
+    /// Two opencode TUIs in two panes at one cwd are ambiguous: refuse
+    /// rather than guess.
+    #[test]
+    fn pane_side_ambiguous_panes_refuse() {
+        let table = rows(&[
+            (1, 0, "/sbin/launchd"),
+            (100, 1, "fno-agents-worker --pane"),
+            (110, 100, "/bin/zsh -il"),
+            (200, 110, "opencode.exe"),
+            (300, 1, "fno-agents-worker --pane"),
+            (310, 300, "/bin/zsh -il"),
+            (400, 310, "opencode.exe"),
+        ]);
+        let panes = vec![pane("main", 3, 100, "/w"), pane("main", 5, 300, "/w")];
+        assert_eq!(from_pane_side(&panes, &table, "/w"), None);
+    }
+
+    /// Each subtree guard refuses alone: a keeper row naming a pid the
+    /// census lacks is a dead tree, and an `opencode serve` inside a pane
+    /// is a server, not a TUI.
+    #[test]
+    fn pane_side_subtree_guards_refuse() {
+        let table = rows(&[(1, 0, "/sbin/launchd")]);
+        let panes = vec![pane("main", 3, 999, "/w")];
+        assert_eq!(from_pane_side(&panes, &table, "/w"), None);
+        let serve_table = rows(&[
+            (1, 0, "/sbin/launchd"),
+            (100, 1, "fno-agents-worker --pane"),
+            (110, 100, "opencode.exe serve --service"),
+        ]);
+        let panes = vec![pane("main", 3, 100, "/w")];
+        assert_eq!(from_pane_side(&panes, &serve_table, "/w"), None);
     }
 }

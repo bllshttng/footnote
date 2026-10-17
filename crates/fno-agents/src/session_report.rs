@@ -190,6 +190,22 @@ pub(crate) fn handle_session_report(
         Some(crate::pane_claim::PaneClaim { session, pane_id })
     });
     let mut pane_rebind: Option<(Option<crate::state::MuxRef>, crate::state::MuxRef)> = None;
+    // A daemon-hosted harness reports from the per-machine daemon, so the
+    // client-side ancestry proof can never fire for it. When no claim rode
+    // the report and the harness is opencode, the pane-side proof names the
+    // pane instead: keeper panes whose subtree runs the opencode TUI at the
+    // report's working directory. It shells out and must not hold the
+    // registry lock, so it runs here, before the locked write. Every
+    // failure is fail-soft: the row still registers through the arms below.
+    let pane_side = match (
+        harness == "opencode",
+        pane_claim.as_ref(),
+        report_cwd.as_deref(),
+    ) {
+        (true, None, Some(cwd)) => pane_side_lookup(cwd),
+        _ => None,
+    };
+    let effective_claim = pane_claim.clone().or(pane_side);
     let wait_row = p
         .get("wait_row")
         .and_then(Value::as_bool)
@@ -241,7 +257,7 @@ pub(crate) fn handle_session_report(
                     row_name = Some(entry.name.clone());
                     r.entries.push(entry);
                     let new_idx = r.entries.len() - 1;
-                    if let Some(claim) = &pane_claim {
+                    if let Some(claim) = &effective_claim {
                         pane_rebind = crate::pane_claim::bind(&mut r.entries, new_idx, claim);
                     }
                     outcome = Outcome::Minted {
@@ -260,7 +276,7 @@ pub(crate) fn handle_session_report(
                 // --resume` typed into a pane); a worker's mux is the
                 // keeper's business, not this report's.
                 if r.entries[i].origin.as_deref() == Some("operator") {
-                    if let Some(claim) = &pane_claim {
+                    if let Some(claim) = &effective_claim {
                         pane_rebind = crate::pane_claim::bind(&mut r.entries, i, claim);
                     }
                 }
@@ -280,7 +296,7 @@ pub(crate) fn handle_session_report(
                 // retired Python heal's `FNO_AGENT_ROW_PENDING` gate): only a
                 // pane-substrate worker's row may take a pane bind here.
                 if !wait_row.is_zero() {
-                    if let Some(claim) = &pane_claim {
+                    if let Some(claim) = &effective_claim {
                         pane_rebind = crate::pane_claim::bind(&mut r.entries, i, claim);
                     }
                 }
@@ -311,7 +327,7 @@ pub(crate) fn handle_session_report(
                 }
                 // Same pane-worker gate as the backfill arm above.
                 if !wait_row.is_zero() {
-                    if let Some(claim) = &pane_claim {
+                    if let Some(claim) = &effective_claim {
                         pane_rebind = crate::pane_claim::bind(&mut r.entries, i, claim);
                     }
                 }
@@ -461,6 +477,68 @@ pub(crate) fn handle_session_report(
             )
         }
     }
+}
+
+/// The pane-side lookup the opencode arm calls: reads keeper pane truth
+/// (`fno mux pane ls --json`, `fno mux pane keeper list --json`, joined on
+/// child_pid; the keeper row supplies the mux session the pane row lacks)
+/// and census process truth, then hands both to the pure
+/// `pane_claim::from_pane_side`. Fail-soft by contract: a missing fno
+/// binary, a downed mux, or unparseable output returns None, and the row
+/// still registers through the report arms unbound.
+fn pane_side_lookup(report_cwd: &str) -> Option<crate::pane_claim::PaneClaim> {
+    let fno = crate::loopcheck::loopcheck_fno_bin();
+    let panes_out = std::process::Command::new(&fno)
+        .args(["mux", "pane", "ls", "--json"])
+        .output()
+        .ok()?;
+    if !panes_out.status.success() {
+        return None;
+    }
+    let keepers_out = std::process::Command::new(&fno)
+        .args(["mux", "pane", "keeper", "list", "--json"])
+        .output()
+        .ok()?;
+    if !keepers_out.status.success() {
+        return None;
+    }
+    let panes: Vec<Value> = serde_json::from_slice(&panes_out.stdout).ok()?;
+    let keepers: Vec<Value> = serde_json::from_slice(&keepers_out.stdout).ok()?;
+    let mut pane_rows: Vec<crate::pane_claim::PaneRow> = Vec::new();
+    for keeper in &keepers {
+        let Some(session) = keeper.get("session").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(child) = keeper.get("child_pid").and_then(Value::as_u64) else {
+            continue;
+        };
+        if keeper.get("stale").is_some() {
+            continue;
+        }
+        let Some(pane_row) = panes
+            .iter()
+            .find(|p| p.get("child_pid").and_then(Value::as_u64) == Some(child))
+        else {
+            continue;
+        };
+        pane_rows.push(crate::pane_claim::PaneRow {
+            session: session.to_string(),
+            pane_id: pane_row.get("pane_id").and_then(Value::as_u64).unwrap_or(0),
+            child_pid: child as u32,
+            cwd: pane_row
+                .get("cwd")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            alt_cwd: pane_row
+                .get("pane_cwd")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        });
+    }
+    let table = crate::census::process_table();
+    crate::pane_claim::from_pane_side(&pane_rows, &table.0, report_cwd)
 }
 
 /// The promoted-row read that decides the arm: a role stamp plus a scope on
@@ -859,9 +937,13 @@ pub async fn run_session_report(rest: &[String], home: &AgentsHome) -> i32 {
     }
     // A proven pane claim rides the request too: a session outside any
     // pane, or one the ancestry walk cannot prove, pays nothing and adds
-    // nothing.
+    // nothing. Without one, the reporter's working directory rides instead,
+    // so a daemon-hosted harness (opencode's plugin runs inside the
+    // per-machine serve daemon) can still be bound from the pane side.
     if let Some(claim) = crate::pane_claim::ambient() {
         params["pane"] = json!({"session": claim.session, "pane_id": claim.pane_id});
+    } else if let Ok(cwd) = std::env::current_dir() {
+        params["cwd"] = Value::String(cwd.display().to_string());
     }
     // --origin-only writes the record and sends nothing - EXCEPT for a child
     // that claimed a launch record: the adopt must never lose the parent edge
@@ -1469,5 +1551,20 @@ mod tests {
         assert_eq!(ok["harness"], "claude");
         assert_eq!(ok["agent_self"], "w1");
         assert_eq!(ok["wait_row"], true);
+    }
+
+    /// AC2-ERR, fail-soft leg: with no fno binary on the resolver seam, the
+    /// pane-side lookup reads None and the report path proceeds unbound - a
+    /// missing mux never blocks a session report.
+    #[test]
+    fn pane_side_lookup_fails_soft_without_fno() {
+        let saved = std::env::var("FNO_LOOPCHECK_FNO_BIN").ok();
+        std::env::set_var("FNO_LOOPCHECK_FNO_BIN", "/nonexistent/fno-under-test");
+        let claim = pane_side_lookup("/w");
+        match saved {
+            Some(v) => std::env::set_var("FNO_LOOPCHECK_FNO_BIN", v),
+            None => std::env::remove_var("FNO_LOOPCHECK_FNO_BIN"),
+        }
+        assert_eq!(claim, None);
     }
 }
