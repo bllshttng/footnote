@@ -92,6 +92,13 @@ pub struct RegistryAgent {
     pub reason: Option<String>,
     /// The `mux` ref, when this row is pane-hosted: (session, pane_id).
     pub mux: Option<(String, u64)>,
+    /// The row's recorded worker pid (the pane's child pid for a
+    /// pane-hosted row). The pane-label join reads it so a recycled pane id
+    /// cannot inherit a dead row's name: a row whose pid disagrees with the
+    /// pane's current child is from a previous incarnation. `None` = the row
+    /// does not say (a legacy row), which reads as unverifiable, never as a
+    /// mismatch.
+    pub pid: Option<u64>,
     /// The answerable-prompt payload from the scrape rung, present only
     /// when this row is `blocked` on a numbered menu the daemon could extract;
     /// `None` for a hook-badged block or a focus-only blocked prompt.
@@ -2122,6 +2129,7 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
             badge,
             reason,
             mux,
+            pid,
             answerable,
             attach_id,
             external: false,
@@ -2435,6 +2443,7 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
             badge: None,
             reason: None,
             mux: None,
+            pid: None,
             answerable: None,
             attach_id: Some(w.short_id.clone()),
             external: true,
@@ -2508,6 +2517,7 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
             badge: None,
             reason: None,
             mux: None,
+            pid: None,
             answerable: None,
             attach_id: Some(roster_hit.short_id.clone()),
             external: false,
@@ -3006,6 +3016,22 @@ mod tests {
             Some("12345678-1234-1234-1234-1234567890ab")
         );
         assert_eq!(get("cx").claude_session_uuid, None, "codex carries no uuid");
+    }
+
+    // The row's recorded worker pid rides the parsed read: the pane-label
+    // join refuses a dead row whose pid disagrees with the pane's current
+    // child, so the field must survive derive_rows.
+    #[test]
+    fn derive_rows_carries_the_row_pid() {
+        let raw = reg(
+            r#"{"name":"bob","cwd":"/w","status":"live","pid":4242,"mux":{"session":"main","pane_id":7}},
+               {"name":"legacy","cwd":"/w","status":"live"}"#,
+        );
+        let rows = derive_rows(&raw, NOW).unwrap();
+        let get = |n: &str| rows.iter().find(|r| r.name == n).unwrap();
+        assert_eq!(get("bob").pid, Some(4242));
+        assert_eq!(get("bob").mux, Some(("main".to_string(), 7)));
+        assert_eq!(get("legacy").pid, None);
     }
 
     #[test]
@@ -4231,6 +4257,7 @@ config_dir = "~/.claude-alt"
             badge,
             reason: None,
             mux: None,
+            pid: None,
             answerable: None,
             attach_id: None,
             external: false,

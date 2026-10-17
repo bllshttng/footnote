@@ -42,7 +42,7 @@ use crate::proto::{
     LayoutTreeChild, LayoutTreeSpec, MouseButton, MouseEvent, MouseKind, PaneInfo, PanePlacement,
     PaneTarget, PlacementFallback, PortalSlot, ProtoError, Reach, ResolvedPlacement, RestoreRow,
     ServerMsg, SlotBinding, SlotOutcome, SlotResult, SquadLayout, SquadMeta, TabInfo, TabLayout,
-    TabMeta, TabPaneOccupant, TabSel, WaitOutcome, MAX_SQUAD_NAME, MAX_TAB_NAME,
+    TabPaneOccupant, TabSel, WaitOutcome, MAX_SQUAD_NAME, MAX_TAB_NAME,
 };
 use crate::pty::{shell_candidates, PaneChunk, PtyShell};
 use crate::restore_liveness::{
@@ -1110,7 +1110,11 @@ use argv_facts::*;
 
 /// The label chain and the pure `PaneMeta` builder live in [`pane_meta`]
 /// (file-budget ratchet); re-imported so callers and tests resolve.
-use pane_meta::{pane_label, tab_label};
+use pane_meta::pane_label;
+// The server_tests family resolves `tab_label` through this module's
+// namespace; the production layout builder now lives in pane_meta itself.
+#[cfg(test)]
+use pane_meta::tab_label;
 
 mod osc_reply;
 mod pane_meta;
@@ -8084,68 +8088,16 @@ impl Core {
                     .iter()
                     .enumerate()
                     .map(|(i, t)| {
-                        // The registry row hosting the focus pane carries the
-                        // LIVE name (a rename rewrites the row, never the
-                        // pane's spawn-captured env), so it leads the derived
-                        // chain ahead of `FNO_AGENT_SELF`.
-                        let focus_reg = pane_meta::pane_registry_name(
+                        pane_meta::tab_meta(
+                            t,
+                            s.canonical_cwd(),
+                            i,
                             &self.agents,
                             &self.session_name,
-                            t.focus,
-                        );
-                        TabMeta {
-                            id: t.id,
-                            // (US2) An explicit rename is the ONLY chosen
-                            // name; a pane-derived or ordinal label is not. The
-                            // client renders a chosen name without a forced ordinal.
-                            named: t.name.is_some(),
-                            name: tab_label(
-                                t.name.as_deref(),
-                                self.panes.get(&t.focus).map(|e| {
-                                    (
-                                        focus_reg.as_deref().or(e.name.as_deref()),
-                                        e.node.as_deref(),
-                                        e.cwd.as_str(),
-                                        e.cmd.as_deref(),
-                                    )
-                                }),
-                                s.canonical_cwd(),
-                                i,
-                            ),
-                            // (v22) Every leaf pane of the tab, labelled from
-                            // its own entry, so the navigator can goto a pane in any
-                            // tab/squad - not just the active view the client tiles.
-                            panes: tree::leaves(&t.root)
-                                .iter()
-                                .map(|pid| {
-                                    let e = self.panes.get(pid);
-                                    let ctx = pane_meta::pane_ctx(
-                                        &self.agents,
-                                        &self.session_name,
-                                        &self.ctx_by_session,
-                                        *pid,
-                                    );
-                                    let reg = pane_meta::pane_registry_name(
-                                        &self.agents,
-                                        &self.session_name,
-                                        *pid,
-                                    );
-                                    let name = reg
-                                        .as_deref()
-                                        .or_else(|| e.and_then(|e| e.name.as_deref()));
-                                    pane_meta::pane_meta(
-                                        *pid,
-                                        name,
-                                        e.and_then(|e| e.node.as_deref()),
-                                        e.map(|e| e.cwd.as_str()).unwrap_or(""),
-                                        e.and_then(|e| e.cmd.as_deref()),
-                                        e.and_then(|e| self.branch_by_cwd.get(&e.cwd))
-                                            .map(String::as_str),
-                                        ctx.as_deref(),
-                                    )
-                                })
-                                .collect(),
-                        }
+                            &self.panes,
+                            &self.ctx_by_session,
+                            &self.branch_by_cwd,
+                        )
                     })
                     .collect(),
                 // The viewed squad highlights the VIEWER's tab; other squads
