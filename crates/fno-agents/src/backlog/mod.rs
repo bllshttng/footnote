@@ -77,6 +77,7 @@ pub mod quota_route;
 pub mod rank_cli;
 pub mod receipt;
 pub(crate) mod reconcile_cli;
+pub mod reid_cli;
 pub mod relatedness;
 pub mod relations;
 pub mod render;

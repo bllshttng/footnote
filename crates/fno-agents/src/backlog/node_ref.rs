@@ -68,6 +68,16 @@ pub fn has_node_id_prefix(s: &str) -> bool {
     s.starts_with(settings::node_id_prefix().as_str()) || s.starts_with("ab-")
 }
 
+/// The row's retired ids: the `aliases` list a re-id rewrites and other
+/// modules read (mint exclusion, collision checks). Absent on rows never
+/// re-id-ed.
+pub(crate) fn entry_aliases(entry: &Value) -> Vec<&str> {
+    match entry.get("aliases").and_then(Value::as_array) {
+        Some(items) => items.iter().filter_map(Value::as_str).collect(),
+        None => Vec::new(),
+    }
+}
+
 /// Deterministic tiers 1 to 3, exact only: exact id, exact slug
 /// (case insensitive), bare 4 to 8 lowercase hex re-prefixed by the
 /// configured prefix then the legacy `ab-`.
@@ -79,6 +89,13 @@ pub fn resolve_tiers<'a>(entries: &'a [Value], query: &str) -> Option<&'a Value>
     }
     for e in entries {
         if e.get("id").and_then(Value::as_str) == Some(query) {
+            return Some(e);
+        }
+    }
+    // Retired ids: a re-id keeps the old id on the row as an alias, so
+    // history written before the rename still resolves. Exact match only.
+    for e in entries {
+        if entry_aliases(e).contains(&query) {
             return Some(e);
         }
     }
@@ -171,6 +188,14 @@ pub fn find_node_index(entries: &[Value], node_id: &str) -> Option<usize> {
         .position(|e| e.get("id").and_then(Value::as_str) == Some(node_id))
     {
         return Some(exact);
+    }
+    // Retired ids resolve to the row that carries them, the same tier the
+    // read ladder serves.
+    if let Some(hit) = entries
+        .iter()
+        .position(|e| entry_aliases(e).contains(&node_id))
+    {
+        return Some(hit);
     }
     for alt in dash_variants(&node_id.to_lowercase()) {
         if let Some(hit) = entries
@@ -527,6 +552,20 @@ mod tests {
         assert!(find_node(&entries, "x-bbbb").is_some());
         assert!(find_node(&entries, "xaaaa").is_some());
         assert!(find_node(&entries, "x-missing").is_none());
+    }
+
+    #[test]
+    fn resolvers_match_a_retired_id_alias() {
+        let entries = vec![json!({"id": "x-cccc", "aliases": ["ab-cccc"]})];
+        assert!(resolve_tiers(&entries, "x-cccc").is_some());
+        assert!(resolve_tiers(&entries, "ab-cccc").is_some());
+        assert!(resolve_tiers(&entries, "ab-dddd").is_none());
+        assert!(find_node(&entries, "ab-cccc").is_some());
+        assert!(find_node(&entries, "b-cccc").is_none());
+        // A row without the key never aliases.
+        let bare = vec![json!({"id": "x-eeee"})];
+        assert!(resolve_tiers(&bare, "x-eeee").is_some());
+        assert!(resolve_tiers(&bare, "eeee").is_none());
     }
 
     #[test]

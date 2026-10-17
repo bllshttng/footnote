@@ -74,6 +74,8 @@ from fno.graph.native_forward import register_native_forward  # noqa: E402
 # keeps the route (hidden, whole-argv forward) so this wheel still serves them.
 register_native_forward(cli, "intake")
 register_native_forward(cli, "decompose")
+# Born native: the in-place id rename has no wheel body at all.
+register_native_forward(cli, "re-id")
 cli.command("worked", hidden=True)(_cmd_worked)
 
 

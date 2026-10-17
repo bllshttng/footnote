@@ -215,6 +215,11 @@ pub fn run(args: &[String]) -> i32 {
         // The vote is native: identity, style gate and the one same-voter
         // refusal over the single-row write seam. No Python twin remains.
         "encounter" => super::encounter_cli::run(resolved.tail),
+        // The in-place id rename is native end to end: gates, one locked
+        // publish, satellite rewrites under the lock, the alias keeping the
+        // old id resolving. No Python twin ever existed (the node filed the
+        // gap this verb closes).
+        "re-id" => super::reid_cli::run(resolved.tail),
         // The create verbs are native end to end as of this wave: parse,
         // gates, locked write with the rollup inside it, receipts.
         "add" => super::create_cli::run(resolved.tail),

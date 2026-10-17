@@ -529,9 +529,26 @@ pub(crate) fn session_provenance(
     )
 }
 
+/// The retired ids every row carries as aliases, best-effort. A re-id keeps
+/// the old id on the row, so the minter must never mint it again. A read
+/// failure degrades to an empty pool, like the archive pool.
+pub(crate) fn alias_pool() -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    let graph = super::settings::graph_path();
+    let Ok(rows) = crate::graph_store::read_rows(&graph) else {
+        return out;
+    };
+    for row in &rows {
+        if let Some(items) = row.get("aliases").and_then(Value::as_array) {
+            out.extend(items.iter().filter_map(|v| v.as_str().map(str::to_string)));
+        }
+    }
+    out
+}
+
 /// Mint a fresh, collision-free node id against the snapshot's ids, the
-/// legacy archive pool, the mint tombstones, and every id a plan
-/// frontmatter names. Must run inside the locked write.
+/// legacy archive pool, the mint tombstones, every id a plan
+/// frontmatter names, and every retired alias. Must run inside the locked write.
 pub(crate) fn mint_node_id(
     existing: &std::collections::BTreeSet<String>,
 ) -> Result<String, String> {
@@ -540,9 +557,10 @@ pub(crate) fn mint_node_id(
     let archive_ids = archived_id_pool();
     let tombstones = load_id_tombstones();
     let plan_ids = plan_frontmatter_ids();
+    let aliases = alias_pool();
     let minted = mint_node_id_with_prefix(
         existing,
-        &[&archive_ids, &tombstones, &plan_ids],
+        &[&archive_ids, &tombstones, &plan_ids, &aliases],
         &prefix,
         width,
     )?;

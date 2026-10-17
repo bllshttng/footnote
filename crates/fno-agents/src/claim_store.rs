@@ -830,6 +830,37 @@ pub(crate) fn records_in(
         .collect())
 }
 
+/// The live holder of one key, if a live or suspect row holds it. A suspect
+/// row still belongs to a session that may wake, so it refuses a re-id too.
+pub(crate) fn live_holder(key: &str) -> Result<Option<String>, String> {
+    let dir = directory(None)?;
+    Ok(records_in(&dir, Some(key), false)?
+        .into_iter()
+        .next()
+        .map(|record| record.holder))
+}
+
+/// Rename one claim key in place, preserving the row. Node keys are shared,
+/// so the primary and the local store are both rewritten. Returns the rows
+/// moved.
+pub(crate) fn rename_key(old: &str, new: &str) -> Result<u64, String> {
+    let dir = directory(None)?;
+    let sql = "UPDATE claims SET key=?1 WHERE key=?2";
+    let mut moved: u64 = 0;
+    if shared(old) {
+        if let Some(remote) = primary_for(&dir)? {
+            moved += on_primary(&remote, sql, &[text(new), text(old)])?
+                .rows
+                .len() as u64;
+        }
+    }
+    if !store_absent(&dir) {
+        let local = Db::Local(open_directory(&dir)?);
+        moved += local.execute(sql, &[text(new), text(old)])?;
+    }
+    Ok(moved)
+}
+
 pub(crate) fn acquire(
     key: &str,
     holder: &str,

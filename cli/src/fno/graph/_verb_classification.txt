@@ -22,6 +22,8 @@ supersede
 contain
 queue
 unqueue
+# the in-place id rename writes the graph under the store lock
+re-id
 # graph-state read: under an external backend the local graph is not
 # the store, so the read must refuse with the rest
 # orchestration that stamps nodes
