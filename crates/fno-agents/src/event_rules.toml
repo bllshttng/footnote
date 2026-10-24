@@ -1,45 +1,52 @@
 # The shipped event-rule table (docs/architecture/event-rules.md). Each
-# [[rule]] row: event, the predicates that must all hold (`not:`-prefixable,
-# named in event_rules.rs PREDICATES), one action, and the three sentences a
-# block or nudge speaks. `default` is the state with no config override;
+# [[rule]] row is one rule in the shared rule schema (crates/fno-agents/src/
+# rules.rs): an action, the three sentences a block or warn speaks, and a
+# [rule.when] trigger. At Stop a row names exactly one event and its
+# predicates (`not:`-prefixable, named in event_rules.rs PREDICATES).
+# `default` is the state with no config override;
 # `event_rules.<id> = true|false` in fno config flips any row.
 
 [[rule]]
 id = "chat_ask_unfiled"
-event = "stop"
-when = ["promoted", "last_message_decision_ask", "not:turn_filed_question"]
 action = "block"
 what = "you asked the user a decision in chat"
 why = "a chat ask is lost at compaction and no reader sees it"
 instead = "fno inbox outstanding ask --question-file q.md --node <node>"
 default = true
+[rule.when]
+events = ["stop"]
+predicates = ["promoted", "last_message_decision_ask", "not:turn_filed_question"]
 
 [[rule]]
 id = "chat_ask_unfiled_worker"
-event = "stop"
-when = ["last_message_decision_ask", "not:turn_filed_question"]
 action = "block"
 what = "you asked the user a decision in chat"
 why = "a chat ask is lost at compaction and no reader sees it"
 instead = "fno inbox outstanding ask --question-file q.md --node <node>"
 default = false
+[rule.when]
+events = ["stop"]
+predicates = ["last_message_decision_ask", "not:turn_filed_question"]
 
 [[rule]]
 id = "decided_ask_fyi"
-event = "decision_span:route"
-when = ["route_self", "actor_is_session"]
-action = "notify"
+action = "inform"
+deliver = "notify"
 what = "an ask this session held was answered in place"
 why = "a self-decided ask is reversible and the user may want it reversed"
 instead = "fno inbox decide --overturns <span_id> --authority operator"
 default = true
+[rule.when]
+events = ["decision_span:route"]
+predicates = ["route_self", "actor_is_session"]
 
 [[rule]]
 id = "why_user_escape"
-event = "operator_question"
-when = ["actor_is_session", "reversible", "has_recommendation", "why_user_set", "not:class_user_only"]
-action = "nudge"
+action = "warn"
 what = "you sent the user a reversible question you hold a recommendation for"
 why = "only public-surface, irreversible, money-security and law-change go to the user"
 instead = "withdraw it and record: fno backlog decide <node> \"<ruling>\""
 default = true
+[rule.when]
+events = ["journal:operator_question"]
+predicates = ["actor_is_session", "reversible", "has_recommendation", "why_user_set", "not:class_user_only"]

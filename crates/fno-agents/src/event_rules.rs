@@ -21,8 +21,6 @@ const TABLE: &str = include_str!("event_rules.toml");
 /// and the fire's span carries `cap_reached`.
 pub(crate) const BLOCK_CAP: usize = 3;
 
-const ACTIONS: &[&str] = &["block", "nudge", "notify", "emit"];
-
 /// The four classes only the user decides; `class_user_only` reads them off
 /// a question's escalate route span.
 const USER_CLASSES: &[&str] = &[
@@ -68,53 +66,42 @@ pub struct Fire {
     pub notify: Option<(String, String, Option<String>)>,
 }
 
+/// The table parses through the shared rule schema (`crate::rules`); this
+/// maps each rule onto the Stop runtime's action names. The runtime's
+/// `nudge` is a `warn`, and `notify` and `emit` are `inform` rows with a
+/// delivery channel.
 fn parse_table() -> Result<Vec<Row>, String> {
-    let raw: toml::Value = toml::from_str(TABLE).map_err(|e| format!("event_rules.toml: {e}"))?;
-    let items = raw
-        .get("rule")
-        .and_then(toml::Value::as_array)
-        .ok_or("event_rules.toml: the [[rule]] array is missing")?;
+    let rules = crate::rules::parse_table(TABLE).map_err(|e| format!("event_rules.toml: {e}"))?;
     let mut rows = Vec::new();
-    for item in items {
-        let get = |k: &str| {
-            item.get(k)
-                .and_then(toml::Value::as_str)
-                .unwrap_or_default()
-                .to_string()
+    for rule in rules {
+        let action = match (rule.action.as_str(), rule.deliver()) {
+            ("block", _) => "block",
+            ("warn", _) => "nudge",
+            ("inform", "notify") => "notify",
+            ("inform", "emit") => "emit",
+            (action, deliver) => {
+                return Err(format!(
+                "event_rules.toml: {}: action {action} with deliver {deliver} has no Stop runtime",
+                rule.id
+            ))
+            }
+        };
+        let [event] = rule.when.events.as_slice() else {
+            return Err(format!(
+                "event_rules.toml: {} must name exactly one event",
+                rule.id
+            ));
         };
         let row = Row {
-            id: get("id"),
-            event: get("event"),
-            when: item
-                .get("when")
-                .and_then(toml::Value::as_array)
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|v| v.as_str().map(str::to_string))
-                        .collect()
-                })
-                .unwrap_or_default(),
-            action: get("action"),
-            what: get("what"),
-            why: get("why"),
-            instead: get("instead"),
-            default: item
-                .get("default")
-                .and_then(toml::Value::as_bool)
-                .unwrap_or(true),
+            event: event.strip_prefix("journal:").unwrap_or(event).to_string(),
+            when: rule.when.predicates.clone(),
+            action: action.to_string(),
+            default: rule.default,
+            id: rule.id,
+            what: rule.what,
+            why: rule.why,
+            instead: rule.instead,
         };
-        if row.id.is_empty() {
-            return Err("event_rules.toml: a row has no id".into());
-        }
-        if !ACTIONS.contains(&row.action.as_str()) {
-            return Err(format!(
-                "event_rules.toml: {} names unknown action {:?}",
-                row.id, row.action
-            ));
-        }
-        if row.event.is_empty() {
-            return Err(format!("event_rules.toml: {} names no event", row.id));
-        }
         if row.what.is_empty() || row.why.is_empty() || row.instead.is_empty() {
             return Err(format!(
                 "event_rules.toml: {} must carry non-empty what, why and instead",
@@ -131,9 +118,6 @@ fn parse_table() -> Result<Vec<Row>, String> {
             }
         }
         rows.push(row);
-    }
-    if rows.is_empty() {
-        return Err("event_rules.toml: no rows".into());
     }
     Ok(rows)
 }

@@ -80,6 +80,22 @@ enum MatchRequest {
     /// refusal kind plus its text.
     #[serde(rename = "resolve-provenance")]
     ResolveProvenance(ResolveProvenanceRequest),
+    /// A rule file validated against the live laws (`crate::rules`).
+    #[serde(rename = "rules-check")]
+    RulesCheck(RulesRequest),
+    /// BM25 against the stage keywords over labeled cases.
+    #[serde(rename = "rules-measure")]
+    RulesMeasure(RulesRequest),
+}
+
+/// The rules modes read one file: `file` for rules-check, `cases` for
+/// rules-measure.
+#[derive(Deserialize)]
+struct RulesRequest {
+    #[serde(default)]
+    file: String,
+    #[serde(default)]
+    cases: String,
 }
 
 /// The resolver request: the caller's authority claim and its carried
@@ -525,6 +541,36 @@ const STAGE_COMMANDS: &[(&str, &str)] = &[
     ("target", "target"),
     ("execute", "target"),
 ];
+
+/// A stage's keywords, for the rules-measure baseline; any other name has none.
+fn stage_keywords(stage: &str) -> Vec<&'static str> {
+    STAGES
+        .iter()
+        .find(|(s, _)| *s == stage)
+        .map(|(_, k)| k.to_vec())
+        .unwrap_or_default()
+}
+
+/// Read the named file and the live laws, then answer with `f`. An
+/// unreadable file or store is an `ok: false` answer, never silence, and so
+/// is a store with damaged rows: a law in a damaged row reads as missing.
+fn rules_answer(path: &str, f: impl Fn(&str, &[Value]) -> Value) -> Value {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) => return json!({"ok": false, "error": format!("{path}: {e}")}),
+    };
+    match decision_index::default_store_live().map(decision_index::laws_of) {
+        Ok(index) => {
+            let mut answer = f(&text, &index.rows);
+            answer["damaged"] = json!(index.damaged);
+            if index.damaged > 0 {
+                answer["ok"] = json!(false);
+            }
+            answer
+        }
+        Err(e) => json!({"ok": false, "error": format!("the decision index: {e}")}),
+    }
+}
 
 /// Normalize a skill invocation to the bare command: strip one leading `/` or
 /// `$`, cut at the first whitespace, keep the text after the last `:`. The
@@ -2723,7 +2769,7 @@ fn node_is_closed(node_id: &str) -> bool {
 pub fn run_law_match(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "-h" || a == "--help") {
         println!(
-            "usage: fno inbox law match (one JSON request on stdin: mode=ask|law|stage|validate|record-scope|scope-split|record|retract|history; record takes argv: the fno inbox law set command line, and stdin: the text --decision-file - reads; retract and history take argv: the matching fno inbox law command line)"
+            "usage: fno inbox law match (one JSON request on stdin: mode=ask|law|stage|validate|record-scope|scope-split|rules-check|rules-measure|record|retract|history; record takes argv: the fno inbox law set command line, and stdin: the text --decision-file - reads; retract and history take argv: the matching fno inbox law command line)"
         );
         return 0;
     }
@@ -2833,6 +2879,16 @@ pub fn run_law_match_str(input: &str) -> i32 {
         }
         MatchRequest::Decisions(r) => {
             return crate::backlog::decisions_cli::run(&r.argv);
+        }
+        MatchRequest::RulesCheck(r) => {
+            serde_json::to_string(&rules_answer(&r.file, crate::rules::check_answer))
+                .expect("serializes")
+        }
+        MatchRequest::RulesMeasure(r) => {
+            serde_json::to_string(&rules_answer(&r.cases, |text, laws| {
+                crate::rules::measure_answer(text, laws, stage_keywords)
+            }))
+            .expect("serializes")
         }
     };
     println!("{answer}");
