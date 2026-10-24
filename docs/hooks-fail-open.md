@@ -12,6 +12,7 @@ A hook that waits blocks a turn. Context that arrives late is worth less than a 
 | Loaded: load1 > cores | 1s | shorten, do not lengthen |
 | Overloaded: load1 >= 8x cores | skip | `hook_overloaded` is true; the hook exits 0 before its preamble |
 | Load unreadable | 3s | fail open; the wall-clock bound still caps |
+| Async run (`FNO_HOOK_ASYNC=1`) | 10s | the harness runs it in the background, so no turn waits; the overload skip still applies |
 
 There is no zero-budget tier. CI runners proved why: under shard load, a zero budget silenced hooks whose contracts require the read to run, and five suites caught it. The busy tier's 1s bound is the floor, and unreadable load always runs.
 
@@ -28,6 +29,26 @@ Two Stop-path context reads also serve from a stale-while-revalidate cache: the 
 ## Gates that decide keep their own budgets
 
 These hooks decide something, so they do not ride the load budget. A decision here blocks, refuses, attests, or delivers control. The list: `target-stop-hook.sh`, every PreToolUse guard, `edit-integrity.sh`, `code-review-attest.sh`, `target-subagent-guard.sh`, `target-stopfailure.sh`, `inject-control-drain-tool-boundary.sh`, and the SessionStart runner `context-run.sh`. The PreToolUse guards by name: `write-gate` (the graph/state, config-dir and generated-copies surfaces in one native gate), `worktree-write-protect`, `join-partition-write-guard`, `plan-location-guard`, `lead-delegation-guard`, `pretooluse-bash-dispatch`, `effect-guard-dispatch`, `subagent-worktree-guard`, and `review-hold`. The PermissionRequest hook `worktree-relocation-allow` decides too. The refusal-streak park check inside `pretooluse-bash` and its PostToolUse recorder `refusal-streak-record.sh` decide too, so both keep their own budgets. The runner's producers carry their own 45s bound. `inject-control-drain-tool-boundary.sh` delivers control mail. With `inbox.tool_boundary_ordinary` on, it delivers ordinary mail too. `inside-leg-report.sh` and `register-session-start.sh` are status and state writers, not optional context. Both keep their own bounds too.
+
+## Four hook classes
+
+Every hook fno registers is one of four classes. `hooks/hook-classes.tsv` holds the class of each registration, one row per harness, event and script. If a registration has no row, `scripts/ci/check-hook-classes.sh` fails CI. So a new hook must declare its class.
+
+| Class | Runs | May deny | Bound | Fails |
+|---|---|---|---|---|
+| block | sync | yes | a timeout | open or closed, declared per row |
+| wait | sync | no; adds context or writes state | a timeout | open |
+| next-turn | async | no | a timeout | open; the result arrives at the next turn |
+| rewake | async | no | a timeout | open; an urgent result wakes an idle session |
+
+Only fixed-trigger checks belong in block. The gate also reads the manifest flags. A Claude entry with `"async": true` must be next-turn, and one with `"asyncRewake": true` must be rewake. A sync entry must be block or wait. A block row names its fail mode.
+
+Per harness:
+
+- **Claude.** All four classes are native. Two runs of `law-stage-inject.sh` are next-turn: the PostToolUse `Skill` and `Edit|Write` matchers. The law context arrives at the next model request. The tool call does not wait for the read. They carry `FNO_HOOK_ASYNC=1`, so `hook_budget_secs` gives them a 10s budget that load does not shorten. The overload skip still applies. The UserPromptSubmit run stays wait, because a law must arrive before the reply. No fno hook is rewake yet.
+- **Codex.** `hooks/codex-hooks.json` has no async flag, so every Codex row is block or wait. A next-turn or rewake result on Codex has to ride the mail bus and arrive through the turn-boundary delivery ([mail-push-first-delivery](architecture/mail-push-first-delivery.md)). No Codex hook does that yet.
+- **fnh.** fnh runs block (with fail closed), next-turn, and rewake natively. A rewake that ends after the fnh process exits is lost. A wake across processes needs the launcher.
+- **OpenCode and Pi.** Their hooks are in-process plugin callbacks, not manifest entries, so the table does not cover them.
 
 ## Third-party hooks: give yours the same budget
 

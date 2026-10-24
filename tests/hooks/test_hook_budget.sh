@@ -66,6 +66,13 @@ hook_load1() { printf 'garbage'; }
 out="$(hook_budget_secs)"
 [[ "$out" == "3" ]] && pass "non-numeric load -> idle tier" || fail "garbage load: got '$out'"
 
+# An async run holds no turn, so load does not shorten it.
+load_lib
+hook_load1() { printf '10.0'; }
+hook_cores() { printf '8'; }
+out="$(FNO_HOOK_ASYNC=1 hook_budget_secs)"
+[[ "$out" == "10" ]] && pass "async run on a loaded machine -> 10s" || fail "async tier: got '$out'"
+
 echo "=== hook_overloaded ==="
 
 # One truth table, one case: load cores [pin] -> expect overloaded (1) or not (0).

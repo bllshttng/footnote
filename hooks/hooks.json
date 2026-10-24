@@ -288,8 +288,9 @@
         "hooks": [
           {
             "type": "command",
-            "command": "PYTHONDONTWRITEBYTECODE=1 FNO_HOOK_CONTEXT=1 bash \"${CLAUDE_PLUGIN_ROOT}/hooks/law-stage-inject.sh\"",
-            "timeout": 4
+            "command": "PYTHONDONTWRITEBYTECODE=1 FNO_HOOK_CONTEXT=1 FNO_HOOK_ASYNC=1 bash \"${CLAUDE_PLUGIN_ROOT}/hooks/law-stage-inject.sh\"",
+            "async": true,
+            "timeout": 12
           },
           {
             "type": "command",
@@ -303,8 +304,9 @@
         "hooks": [
           {
             "type": "command",
-            "command": "PYTHONDONTWRITEBYTECODE=1 FNO_HOOK_CONTEXT=1 bash \"${CLAUDE_PLUGIN_ROOT}/hooks/law-stage-inject.sh\"",
-            "timeout": 4
+            "command": "PYTHONDONTWRITEBYTECODE=1 FNO_HOOK_CONTEXT=1 FNO_HOOK_ASYNC=1 bash \"${CLAUDE_PLUGIN_ROOT}/hooks/law-stage-inject.sh\"",
+            "async": true,
+            "timeout": 12
           }
         ]
       },

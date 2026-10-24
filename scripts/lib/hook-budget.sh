@@ -44,6 +44,9 @@
 
 HOOK_BUDGET_IDLE_SECS=3
 HOOK_BUDGET_BUSY_SECS=1
+# Async tier: a hook the harness runs in the background (FNO_HOOK_ASYNC=1 on
+# its command) holds no turn, so load does not shorten it.
+HOOK_BUDGET_ASYNC_SECS=10
 # Skip tier: at this many waiting jobs per core the hook's own preamble can
 # pass the harness's outer cap on its own. FNO_HOOK_BUDGET_SKIP_PER_CORE
 # pins it; a suite that runs a real hook pins it past any runner load.
@@ -96,6 +99,10 @@ hook_budget_secs() {
         '' | *[!0-9]*) ;;                       # unset or junk: the tiers rule
         *) printf '%s' "$FNO_HOOK_BUDGET_SECS"; return 0 ;;
     esac
+    if [[ "${FNO_HOOK_ASYNC:-}" == "1" ]]; then
+        printf '%s' "$HOOK_BUDGET_ASYNC_SECS"
+        return 0
+    fi
     local load
     load=$(hook_load1)
     case "$load" in
