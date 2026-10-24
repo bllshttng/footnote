@@ -12,7 +12,7 @@ import pytest
 
 
 def test_the_complete_roster_carries_the_evidence_backed_hosts(monkeypatch):
-    """AC1-HP: KNOWN_HARNESSES is the COMPLETE supported roster - the ten
+    """AC1-HP: KNOWN_HARNESSES is the COMPLETE supported roster - the eleven
     capability-backed names plus hermes and openclaw, which host real sessions
     per docs/SETUP-*.md. The roster lives in Rust (provider.rs
     KNOWN_HARNESSES) and the import proxies it through the fno-agents
@@ -39,10 +39,11 @@ def test_the_complete_roster_carries_the_evidence_backed_hosts(monkeypatch):
         "openclaw",
         "zcode",
         "footnote",
+        "muse",
     }
     from fno.agents.harness_map import known_harnesses
 
-    # The capability-backed roster stays at ten; the wider names ride the
+    # The capability-backed roster stays at eleven; the wider names ride the
     # roster only, which is the asymmetry this change exists to declare.
     assert set(known_harnesses()) == {
         "claude",
@@ -55,6 +56,7 @@ def test_the_complete_roster_carries_the_evidence_backed_hosts(monkeypatch):
         "grok",
         "zcode",
         "footnote",
+        "muse",
     }
 
     # The door mechanics, folded under the test-delta declaration cap: the

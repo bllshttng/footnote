@@ -164,6 +164,7 @@ const PROMPT_HARNESSES: &[&str] = &[
     "cursor-agent",
     "grok",
     "zcode",
+    "muse",
 ];
 
 /// Flags that take a value, so the value is not read as the prompt.

@@ -1,0 +1,9 @@
+# muse readiness manifest - deliberately rule-free.
+#
+# The validator requires every capability-row harness to bundle a manifest
+# this file satisfies; the ROW carries `ready_marker = "unsupported"` because
+# fno runs Muse Code over MSP (`muse serve`) and `muse exec --json`, never in
+# a pane, so there is no terminal grid to match rules against. Pin rules here
+# only from a live Muse TUI capture, when a pane lane exists.
+#
+# State vocabulary + arbitration: see codex.toml.

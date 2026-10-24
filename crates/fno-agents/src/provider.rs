@@ -1922,6 +1922,7 @@ pub const KNOWN_HARNESSES: &[&str] = &[
     "grok",
     "zcode",
     "footnote",
+    "muse",
 ];
 
 /// Infer the dispatch provider when `--provider` is absent, mirroring Python
@@ -1960,6 +1961,7 @@ pub const KNOWN_PROVIDERS: &[&str] = &[
     "grok",
     "zcode",
     "footnote",
+    "muse",
 ];
 
 /// The roster joined for error messages ("claude, codex, gemini, agy, opencode, pi").
@@ -1984,6 +1986,7 @@ pub fn for_name(name: &str) -> Option<Box<dyn Provider>> {
         "grok" => Some(Box::new(GrokProvider)),
         "zcode" => Some(Box::new(crate::zcode::ZcodeProvider)),
         "footnote" => Some(Box::new(crate::footnote_harness::FootnoteProvider)),
+        "muse" => Some(Box::new(crate::muse::MuseProvider)),
         _ => None,
     }
 }

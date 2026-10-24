@@ -1447,8 +1447,7 @@ async fn run(args: Vec<String>) -> i32 {
         {
             return code;
         }
-        if let Some(code) = fno_agents::footnote_harness::maybe_run_ask(&home, &params, &agent_name)
-        {
+        if let Some(code) = fno_agents::thread_host::maybe_run_ask(&home, &params, &agent_name) {
             return code;
         }
         // Opencode `ask` is intercepted client-side: opencode is
@@ -2794,27 +2793,12 @@ fn maybe_run_spawn(
             params.get("node").and_then(|v| v.as_str()),
         )),
 
-        // footnote headless: footnote's own loop, run in this process.
-        ("footnote", "headless") => emit!(fno_agents::footnote_harness::dispatch_once(
-            home,
-            name,
-            &message,
-            from_name,
-            &cwd,
-            fno_agents::footnote_harness::fenced_model(params).as_deref(),
-            timeout,
-            params,
-        )),
-        // footnote thread: an fno-owned host holds fnh's ACP session open.
-        ("footnote", "bg") => emit!(fno_agents::footnote_harness::thread::dispatch_thread(
-            home,
-            name,
-            &message,
-            from_name,
-            &cwd,
-            fno_agents::footnote_harness::fenced_model(params).as_deref(),
-            params,
-        )),
+        // footnote (ACP) and muse (MSP): an fno-owned host holds the session.
+        (h @ ("footnote" | "muse"), s @ ("headless" | "bg")) => {
+            emit!(fno_agents::thread_host::dispatch(
+                home, h, s, name, &message, from_name, &cwd, timeout, params
+            ))
+        }
 
         // Codex thread is supervisor-hosted by the daemon. Returning `None`
         // preserves the request's `substrate=thread` so the daemon can own the

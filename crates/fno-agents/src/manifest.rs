@@ -807,6 +807,8 @@ pub fn bundled_manifest(agent: &str) -> Option<&'static str> {
         "zcode" => Some(include_str!("manifests/zcode.toml")),
         // footnote: no pane lane, so no rules; see manifests/footnote.toml.
         "footnote" => Some(include_str!("manifests/footnote.toml")),
+        // muse: MSP and exec lanes only, so no rules; see manifests/muse.toml.
+        "muse" => Some(include_str!("manifests/muse.toml")),
         _ => None,
     }
 }

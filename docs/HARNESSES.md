@@ -25,6 +25,7 @@ Not for: per-CLI command syntax or hook wiring detail. Those are the harness's o
 | grok CLI | fno drives its hosted TUI. Rust ACP is separate. Headless `grok -p` awaits signed-in create/resume proof. | Sequential |
 | zcode (ZCode's CLI agent) | Headless one-shot lane: fno runs `zcode -p` turns and resumes the minted `sess_<uuid>` by name. The TUI lane is unmeasured on the 3.14.3 bundle. | Sequential |
 | footnote (footnote's own loop) | Headless: the `fno-agents` client runs the turn loop over a model API, with `-- -m <provider>/<model>` after the fence. Pane: `--as pane` hosts the TUI as `footnote --spec <file>`; the spec file is the same launch spec the headless lane pipes on stdin. Thread: `--as thread` holds one session open over ACP stdio (see below). | Sequential |
+| Muse Code (`muse`) | Thread: `--as thread` holds one session open over MSP, the Muse Session Protocol that `muse serve` speaks on stdio. Headless: `--as headless` runs one `muse exec --json` turn. No pane lane. | Sequential |
 
 ### footnote
 
@@ -52,6 +53,33 @@ Tools run with your own permissions. There is no sandbox.
 | `fno agents session stop <name>` | The stop signals the host. The host rejects any pending ask, sends `session/cancel`, and closes fnh's stdin. fnh writes its terminal record. |
 
 Mail and asks run one turn at a time. A mail sent during a turn waits until the turn ends. An ask nobody answers rejects after 290 s, and fnh rejects on its own at 300 s. Neither side allows by default. The permission-response rows in the capability table stay unsupported, because they describe pane keystrokes.
+
+### muse
+
+`fno agents spawn -H muse --as thread "<task>"` starts Muse Code (Meta's coding CLI). The `fno-agents-worker --muse-host` process runs `muse serve`, holds its stdin and stdout, and serves the session on a socket under `~/.fno/agents/muse/`. The registry row carries the Muse session id, the host pid and that socket. fno picks the session id, so the row is bound before the first turn. `--as headless` runs one `muse exec --json --session-id <id>` turn instead. `fno agents mail ask <name>` on a headless row runs the same form again, and Muse continues the session. Tokens after the `--` fence go to `muse serve` or `muse exec` unchanged. Muse refuses an unknown flag itself. `FNO_MUSE_BIN` names another binary. Log in first with `muse login` or `META_API_KEY`.
+
+#### The thread lane: steering over MSP
+
+| Command | MSP message |
+|---|---|
+| `fno agents mail send <name> ...` | `turn/start` with the wrapped mail as text, `ifBusy: "queue"`, and `displayText` set to `[fno-mail <envelope id>]`. |
+| `fno agents mail ask <name> "<text>"` | `turn/start`. A text that starts with `/<skill>` goes as a skill part. |
+| `fno agents mail ask <name> --answer allow_once\|deny` | `approval/decide` with the choice Muse offered for that decision. |
+| `fno agents session stop <name>` | The host denies a pending approval, sends `turn/interrupt` and `session/leave` with `stop: true`, then closes `muse serve`'s stdin. |
+
+The proof of a delivery is the user message that Muse records with the host's own `commandId` and the envelope id. A `turn/started` event alone does not count, because a queued turn starts later. The host answers within 10 s with one of the delivery states. `accepted-new-turn` means Muse recorded the message. `parked` means the message waits in Muse's queue behind a running turn. Muse runs it when that turn ends, so the send reports it hosted and writes no durable copy, which would reach the worker twice. The host appends the late landing to `~/.fno/agents/muse/<session>.delivery.jsonl`. An approval nobody answers is denied after 290 s, the footnote host's bound. `failed` names a reason: `reclaimed` for `turn/unqueued`, `retracted`, or the MSP error kind. Mail never steers a running turn.
+
+The `--yolo` bypass maps to `muse serve --disable-sandbox --trust-workspace` and approval mode `allowAll`, because `serve` has no `--yolo`. `--permission-mode untrusted|on-request|never` selects the wire mode `promptUnmatched`, `onRequest` or `allowAll`.
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| A worker cannot write `~/.fno` (`Operation not permitted`) | The default Muse sandbox refuses writes outside the workspace. Adding `~/.fno` to the workspace roots does not lift it. Only the `:unrestricted` profile does, and that turns the sandbox off. | Spawn with `-- --yolo` when the worker must run `fno backlog` or `fno agents mail` |
+| `session ... is already in use` (`sessionInUse`) | Another host holds the session's writer lease, for example a Muse TUI | Stop the other host. fno cannot attach to a TUI session. |
+| `muse session-message` answers `external_agent_ingress_closed` | Meta keeps the external agent ingress gate closed on this login | Use fno mail. It goes over MSP and does not need the gate. |
+| The binary changes under a live worker | The `muse` launcher updates itself | The host sets `MUSE_NO_AUTO_UPDATE=1` on its child. Restart the worker to pick up a new version. |
+| `the muse host exited before the session opened` | `muse serve` refused a flag or the login | Read the host log the refusal names, under `~/.fno/agents/muse/` |
+
+Steer during a running turn and the approval round trip are not yet measured on a real model. The echo provider ends a turn before a steer can land. The echo-provider journey passed: spawn, mail, ask and stop on the thread lane, and create and continue on the headless lane. Always name the lane with `--as thread` or `--as headless`. A spawn with no `--as` refuses, the same as footnote, so the capability row keeps `spawn` at `capable`.
 
 ### zcode
 

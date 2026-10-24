@@ -1936,10 +1936,9 @@ async fn dispatch_agent(ctx: &Arc<Ctx>, req: &Request) -> Response {
             })
             .await
         }
-        // Live mail the Python send routes here: a footnote thread's host.
+        // Live mail the Python send routes here: a footnote or muse thread's host.
         Some("deliver") => {
-            let deliver =
-                |c: &Ctx, r: &Request| crate::footnote_harness::thread::deliver_rpc(&c.home, r);
+            let deliver = |c: &Ctx, r: &Request| crate::thread_host::deliver_rpc(&c.home, r);
             run_blocking(ctx, req, deliver).await
         }
         _ => Response::err(
@@ -4820,11 +4819,11 @@ pub(crate) async fn stop_worker_confirmed_for_home(
     if let Some(sock) = keeper_thread_sock(entry) {
         return stop_keeper_confirmed(&sock).await;
     }
-    // A footnote row has no worker socket: its pid (a headless child, or a
-    // thread host that cancels the turn on SIGINT) leads its own group, and a
-    // thread host's fnh child leads another.
-    if let (true, Some(pid)) = (entry.harness_name() == "footnote", entry.pid) {
-        return crate::footnote_harness::thread::stop_row(pid, entry).await;
+    // A footnote or muse row has no worker socket: its pid (a headless child,
+    // or a thread host that cancels the turn on SIGINT) leads its own group,
+    // and a thread host's harness child leads another.
+    if let Some(stopped) = crate::thread_host::stop_row(entry).await {
+        return stopped;
     }
     let sock = home.worker_sock(&entry.short_id);
     // 1. Graceful: ask the worker to tear down its PTY child + exit. Both the

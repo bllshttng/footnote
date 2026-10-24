@@ -1948,6 +1948,7 @@ mod tests {
                 "footnote",
                 "gemini",
                 "grok",
+                "muse",
                 "opencode",
                 "pi",
                 "zcode"

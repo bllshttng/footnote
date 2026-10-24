@@ -1,0 +1,67 @@
+$ muse serve --help
+version: Muse Code 1.4.12 (1.4.12-R6909.1)
+
+muse serve — serve an MSP session host over stdio
+
+Usage: muse serve [--provider <PROVIDER>] [--model <MODEL>] [--preset <PRESET>] [OPTIONS]
+
+The client owns this process's stdin and stdout and is its only
+connection. Sandbox posture and session durability are constructed
+here and apply to every session the host loads; neither is negotiable
+over the wire. With `--listen` the same binary serves a multi-client
+socket daemon instead, and each session narrows trust under the
+ceiling. Approval mode is the other way round — it is selected
+on the wire, so there is no approval flag here.
+
+Options:
+  -h, --help
+          Print this help
+      --no-session-log
+          Use memory-only sessions
+  -c, --config <KEY=VALUE>
+          Set one setting for this host (repeatable; values are JSON). Secrets
+          only as whole-value ${VAR}; unknown or clashing keys refuse the run.
+
+Provider selection (this process only; never rewrites settings):
+      --preset <PRESET>
+          Existing preset for this host (this process only; never rewrites
+          settings)
+      --provider <PROVIDER>
+          Startup provider for this host: echo, meta, or local (default: from
+          your settings, else meta)
+      --model <MODEL>
+          Model id for non-echo providers (default: your configured model, else
+          the provider's default)
+      --contributor-mode <on|off>
+          Per-process contributor mode override (this host only; never
+          persisted)
+      --disable-request-user-input
+          Withhold request_user_input from the main conversation of every served
+          session (side chats keep it)
+
+Sandbox posture (fixed for the host's lifetime):
+      --disable-sandbox
+          Disable shell filesystem/network sandboxing for this host
+      --sandbox-network <MODE>
+          Sandbox network mode (default: proxy-only)
+      --disable-write
+          Disable non-shell workspace filesystem writes
+      --disable-shell
+          Disable workspace shell execution
+      --trust-workspace
+          Load each session workspace's skills and rules
+
+Socket daemon (multi-client; sessions choose trust per session):
+      --listen [unix:<PATH>]
+          Serve a multi-client socket daemon instead of the stdio host (bare:
+          the well-known per-user-machine socket)
+      --allow-workspace-trust
+          Allow sessions on this daemon to choose workspace trust (socket-only:
+          requires --listen; sessions default untrusted)
+
+Examples:
+  muse serve --provider meta
+  muse serve --model <MODEL>
+  muse serve --provider meta --model <MODEL>
+  muse serve --preset native-basic
+

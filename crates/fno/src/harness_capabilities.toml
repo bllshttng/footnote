@@ -3,7 +3,7 @@
 # (Python package data) and crates/fno/src/harness_capabilities.toml (include_str!ed by
 # the fno mux). Edit the canonical and rebuild; the rust-ci generated-copies dirty-tree
 # step fails on a hand-edited copy.
-map_version = 24
+map_version = 25
 
 [harness.claude]
 # THE DELIVERED-MAIL HEADER FORM. Every delivered mail opens with one
@@ -1810,6 +1810,109 @@ headless = "unsandboxed"
 [harness.footnote.features.spawn]
 state = "capable"
 
+# muse: Muse Code 1.4.12. A thread is `muse serve` (MSP, NDJSON JSON-RPC over
+# stdio) held by an fno host (muse/host.rs); headless is `muse exec --json`.
+# Every value below was read from `muse --help`, `muse serve --help`,
+# `muse exec --help`, the exported MSP schema, or an echo-provider probe
+# (2026-10-24, no model spend).
+[harness.muse]
+# A text part reads `@relative/path` as a file mention (schema TurnInputPart),
+# so the mail header names the sender plainly.
+mail_header_at = false
+# exec takes --yolo; the thread host maps it to `serve --disable-sandbox
+# --trust-workspace` plus approvalMode allowAll, since serve has no --yolo.
+permission_bypass = ["--yolo"]
+efforts = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
+# exec's --approval-mode names. The thread host selects the wire mode:
+# untrusted -> promptUnmatched, on-request -> onRequest, never -> allowAll.
+# session/start accepted all four wire modes and read each back (echo probe).
+permission_modes = ["untrusted", "on-request", "never"]
+resume = "native-session"
+autonomous_pane = false
+route_on_pane = false
+# Muse has a stop hook event (schema HookEventName), but fno installs no Muse
+# hook, so looping dispatch refuses until one exists.
+loop_participation = "extension"
+loop_extension = ""
+command_surface = "slash"
+slash_prefix = ""
+ready_marker = "unsupported"
+ready_rule_ids = []
+manifest_rules = []
+send_keys_enter_delay_ms = 0
+submit_keys = ["enter"]
+stop_strategy = "registry-noop"
+remove_strategy = "registry-only"
+# session/start takes the caller's sessionId and exec takes --session-id.
+session_binding = { strategy = "preassigned", required = true, timeout_ms = 5000 }
+
+[harness.muse.permission_response.allow_once]
+supported = false
+rule_ids = []
+keys = []
+
+[harness.muse.permission_response.allow_always]
+supported = false
+rule_ids = []
+keys = []
+
+[harness.muse.permission_response.deny]
+supported = false
+rule_ids = []
+keys = []
+
+# The TUI takes no caller session id, so fno cannot bind a TUI it launches.
+[harness.muse.resume_strategy.forms.interactive_create]
+kind = "unsupported"
+tokens = []
+
+[harness.muse.resume_strategy.forms.interactive_resume]
+kind = "flag"
+tokens = ["muse", "resume", "{session_id}"]
+
+# A second host refuses a session another host holds: session/resume answered
+# -32021 sessionInUse while the first host lived.
+[harness.muse.resume_strategy.forms.interactive_attach]
+kind = "unsupported"
+tokens = []
+
+# Measured: the first call with an id creates the session, the second
+# continues it (session/read turnCount 2).
+[harness.muse.resume_strategy.forms.headless_create]
+kind = "flag"
+tokens = ["muse", "exec", "--json", "--session-id", "{session_id}"]
+
+[harness.muse.resume_strategy.forms.headless_resume]
+kind = "flag"
+tokens = ["muse", "exec", "--json", "--session-id", "{session_id}"]
+
+# session/setModel exists on the wire; no row kind fits an RPC switch yet.
+[harness.muse.model_switch_strategy]
+kind = "unsupported"
+tokens = []
+effort_labels = {}
+status_command = ""
+status_pattern = ""
+
+# The default sandbox refuses `touch ~/.fno/...` ("Operation not permitted"),
+# and adding ~/.fno to workspaceRoots did not lift it. Of the four permission
+# profiles (permissionProfile/list), only :unrestricted wrote there, and that
+# is the sandbox off. So the one carrier is `--yolo`: the thread host maps it
+# to `serve --disable-sandbox` (a userShell touch of ~/.fno then succeeded),
+# and exec takes it as "Disable approval and sandbox" (`muse exec --help`).
+# A spawn without it runs sandboxed and cannot write the state root.
+[harness.muse.state_root_grant]
+pane = "unmeasured"
+thread = "yolo-disable-sandbox"
+headless = "yolo-disable-sandbox"
+
+# spawn: `capable`, footnote's stance. The echo-provider journey passed on
+# 2026-10-24 with an explicit `--as thread|headless`, which the Rust client
+# serves. `native` would seat a spawn with no `--as` on the Python door,
+# which has no muse leg.
+[harness.muse.features.spawn]
+state = "capable"
+
 # PANE-TO-THREAD CONVERSION (`fno agents resume <name> --substrate thread`).
 # One stanza per harness naming HOW a live pane becomes a persistent thread.
 # One stanza per harness naming HOW a live pane becomes a persistent thread.
@@ -1975,6 +2078,14 @@ reason = "no fno hook registration for zcode (no plugin hook file and no capabil
 state = "missing"
 reason = "no fno hook registration for zcode (no plugin hook file and no capability install lane)"
 
+[harness.muse.hooks.lead_guard]
+state = "missing"
+reason = "no fno hook registration for muse (no plugin hook file and no capability install lane)"
+
+[harness.muse.hooks.lead_reinject]
+state = "missing"
+reason = "no fno hook registration for muse (no plugin hook file and no capability install lane)"
+
 [harness.claude.hooks.session_state]
 state = "supported"
 via = ["hooks/session-state.sh", "hooks/hooks.json", "crates/fno-agents/src/hook/session_state.rs"]
@@ -2053,6 +2164,10 @@ reason = "no session-state push for grok (no fno hook registration; the per-harn
 state = "missing"
 reason = "no session-state push for zcode (no fno hook registration; the per-harness report adapters land with the session-state push work)"
 
+[harness.muse.hooks.session_state]
+state = "missing"
+reason = "no session-state push for muse (no fno hook registration; the per-harness report adapters land with the session-state push work)"
+
 # ── event_rules ────────────────────────────────────────────────────────────────
 # The Stop-boundary rule table (docs/architecture/event-rules.md). claude and
 # codex run it in-process inside fno-agents hook stop; the adapters whose Stop
@@ -2098,3 +2213,7 @@ reason = "no fno hook registration for grok (no plugin hook file and no capabili
 [harness.zcode.hooks.event_rules]
 state = "impossible"
 reason = "no fno hook registration for zcode (no plugin hook file and no capability install lane), so its Stop never reaches the rule engine"
+
+[harness.muse.hooks.event_rules]
+state = "impossible"
+reason = "no fno hook registration for muse (no plugin hook file and no capability install lane), so its Stop never reaches the rule engine"

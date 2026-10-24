@@ -833,7 +833,7 @@ mod tests {
         let rows =
             rows_from_toml(crate::harness_capabilities::CAPABILITY_TOML).expect("canon table");
         let report = sweep(&rows, None);
-        assert_eq!(rows.len(), 10);
+        assert_eq!(rows.len(), 11);
         assert!(report.fields > 30, "fields={}", report.fields);
         let uniform: Vec<_> = report
             .uniform

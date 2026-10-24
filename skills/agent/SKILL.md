@@ -91,6 +91,7 @@ Read this table before you seat a worker on a node. Use the harness's own line w
 | opencode | `fno agents spawn -H opencode --name <name> --node <node> '/fno:target <node>'` | not measured on v2 | [launch-opencode.md](references/launch-opencode.md) |
 | pi | `fno agents spawn -H pi --name <name> --node <node> '/fno:target <node>'` | `fno mux pane run --cwd <repo-root> -- pi ... '/skill:target <node>'` | [launch-pi.md](references/launch-pi.md) |
 | agy | `fno agents spawn -H agy --name <name> --node <node> '/fno:target <node>'` | `fno mux pane run --cwd <repo-root> -- agy ... -i '/target <node>'` | [launch-agy.md](references/launch-agy.md) |
+| muse | `fno agents spawn -H muse --as thread --name <name> --node <node> '<task>' -- --yolo` | no pane lane | [launch-muse.md](references/launch-muse.md) |
 
 The implementation lane is claude on glm through zai. A claude route rides a `--settings` file, so ask spawn for the exact line and run what it prints: `fno agents spawn --name <name> '/fno:target <node>' --route 'zai,glm-5.3-flash[1m]' --effort xhigh --permission-mode bypassPermissions --print`.
 

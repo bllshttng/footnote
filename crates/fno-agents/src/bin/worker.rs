@@ -32,6 +32,9 @@
 //!   over ACP stdio for a `-H footnote --substrate thread` row and serves it
 //!   on a unix socket (footnote_harness/thread.rs). Callers build this argv;
 //!   humans never type it.
+//! - `--muse-host <spec> <socket> <name>`: the same for one Muse session
+//!   over MSP (`muse serve`) for a `-H muse --substrate thread` row
+//!   (muse/host.rs).
 //!
 //! The worker ignores SIGHUP so a stray hangup (e.g. the controlling
 //! terminal going away) cannot take it - and therefore the PTY child -
@@ -115,6 +118,15 @@ fn main() {
             &name,
         ));
     }
+    if let Some(idx) = args.iter().position(|a| a == "--muse-host") {
+        let [spec, socket, name] =
+            [1, 2, 3].map(|i| args.get(idx + i).cloned().unwrap_or_default());
+        std::process::exit(fno_agents::muse::host::run_host(
+            PathBuf::from(spec).as_path(),
+            PathBuf::from(socket).as_path(),
+            &name,
+        ));
+    }
     if let Some(idx) = args.iter().position(|a| a == "--paths-exec") {
         let rest: Vec<String> = args[idx + 1..].to_vec();
         std::process::exit(fno_agents::paths_cli::run(&rest));
@@ -126,8 +138,9 @@ fn main() {
              --store-exec (one store request), --law-exec (one law request on \
              stdin), or --law-exec-arg <request> (one law request by argv, \
              stdin inherited), --paths-exec <command> [args...] (one paths \
-             command, e.g. emit-shell), or --footnote-host <spec> <socket> <name> \
-             (one footnote thread session)"
+             command, e.g. emit-shell), --footnote-host <spec> <socket> <name> \
+             (one footnote thread session), or --muse-host <spec> <socket> <name> \
+             (one muse thread session)"
         );
         std::process::exit(2);
     }

@@ -338,9 +338,17 @@ fn child_file(socket: &Path) -> PathBuf {
 /// Stop a footnote row's pid group. For a thread row, then make sure the
 /// host's fnh child is gone too, or it keeps running and holds the session.
 pub(crate) async fn stop_row(pid: u32, entry: &RegistryEntry) -> bool {
+    let child = host_socket(entry).map(|s| child_file(&s));
+    stop_host(pid, entry.pid_start_time, child).await
+}
+
+/// Stop a host's pid group, then SIGKILL the group of the child named in
+/// `child_file` if it outlived its host. Shared by the footnote and muse
+/// thread hosts, which both write that file beside their socket.
+pub(crate) async fn stop_host(pid: u32, started: Option<u64>, child_file: Option<PathBuf>) -> bool {
     use crate::daemon::{pid_gone_within, pid_is_ours};
-    let stopped = super::stop_confirmed(pid, entry.pid_start_time).await;
-    let Some(file) = host_socket(entry).map(|s| child_file(&s)) else {
+    let stopped = super::stop_confirmed(pid, started).await;
+    let Some(file) = child_file else {
         return stopped;
     };
     let child = std::fs::read_to_string(&file)
@@ -355,8 +363,9 @@ pub(crate) async fn stop_row(pid: u32, entry: &RegistryEntry) -> bool {
     if let Some((child, start)) = child {
         let gone = pid_gone_within(child, Some(start), Duration::from_secs(2)).await;
         if !gone && pid_is_ours(child, Some(start)) {
-            // SAFETY: fnh called setpgid(0, 0) (FOOTNOTE_PROFILE.own_group),
-            // and pid_is_ours rejected pid 0, 1 and a recycled pid.
+            // SAFETY: the child leads its own group (fnh: FOOTNOTE_PROFILE.own_group;
+            // muse serve: process_group(0)), and pid_is_ours rejected pid 0, 1
+            // and a recycled pid.
             unsafe { libc::killpg(child as libc::pid_t, libc::SIGKILL) };
         }
         let _ = std::fs::remove_file(&file);
