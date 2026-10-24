@@ -161,20 +161,21 @@ def test_the_crosscheck_leaves_stdout_parseable_as_json(cwd_tmp, stub_roster):
     assert "UNCLAIMED but a live worker" in r.output
 
 
-def test_a_completeness_warning_still_degrades(cwd_tmp, stub_roster):
-    """Rows that carry no session id are rows the scan cannot vouch for, and a
-    truncated scan must never read as authoritative, so the reader blocks: the
-    claim reads "roster not consulted", never a clean free. The cwds stay
-    plain: a linked-worktree cwd would make the row an attributed advisory
-    instead of a skipped count."""
+def test_a_completeness_warning_degrades_to_a_named_skip(cwd_tmp, stub_roster):
+    """Rows that carry no session id are rows the scan cannot vouch for: they
+    skip with an advisory summary and the reader answers from the rows it can
+    vouch for. The refusal posture once blanked the unplanned queue on one
+    stuck no-provenance pane, so an unattributable row now degrades the read
+    instead of refusing it. The cwds stay plain: a linked-worktree cwd would
+    make the row an attributed advisory instead of a skipped count."""
     stub_roster([
         _stub_row("t-nosid-a", "working", str(cwd_tmp / "plain-a")),
         _stub_row("t-nosid-b", "working", str(cwd_tmp / "plain-b")),
         _stub_row("t-nosid-c", "working", str(cwd_tmp / "plain-c")),
     ])
     r = runner.invoke(cli, ["status", "node:x-76d1"])
-    assert "roster not consulted" in r.output
-    assert "carried no session id" in r.output
+    assert "roster not consulted" not in r.output
+    assert r.exit_code == 0, r.output
 
 
 def test_handover_refuses_transient_cli_pid(monkeypatch, cwd_tmp):

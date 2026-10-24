@@ -440,3 +440,40 @@ fn node_dispatch_is_a_code_payload_without_a_message_prefix() {
     assert_eq!(refusal.exit_code, EXIT_REFUSAL);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn the_launch_cwd_is_pre_trusted_in_the_codex_config() {
+    let _guard = CODEX_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let home = tempfile::tempdir().unwrap();
+    let saved = std::env::var_os("CODEX_HOME");
+    std::env::set_var("CODEX_HOME", home.path());
+    let project = tempfile::tempdir().unwrap();
+    // A fresh never-trusted dir: the upsert writes the exact key codex reads.
+    assert!(super::ensure_codex_folder_trust(project.path()));
+    let text = std::fs::read_to_string(home.path().join("config.toml")).expect("config written");
+    assert!(
+        text.contains(project.path().to_string_lossy().as_ref())
+            && text.contains("trust_level = \"trusted\""),
+        "{text}"
+    );
+    // A second call answers true without needing a rewrite.
+    assert!(super::ensure_codex_folder_trust(project.path()));
+    // A malformed existing config is never clobbered.
+    std::fs::write(home.path().join("config.toml"), "not toml [ at all").unwrap();
+    assert!(!super::ensure_codex_folder_trust(project.path()));
+    assert_eq!(
+        std::fs::read_to_string(home.path().join("config.toml")).unwrap(),
+        "not toml [ at all"
+    );
+    // A `projects` key that is not a table is refused untouched too.
+    std::fs::write(home.path().join("config.toml"), "projects = \"nope\"\n").unwrap();
+    assert!(!super::ensure_codex_folder_trust(project.path()));
+    assert_eq!(
+        std::fs::read_to_string(home.path().join("config.toml")).unwrap(),
+        "projects = \"nope\"\n"
+    );
+    match saved {
+        Some(v) => std::env::set_var("CODEX_HOME", v),
+        None => std::env::remove_var("CODEX_HOME"),
+    }
+}

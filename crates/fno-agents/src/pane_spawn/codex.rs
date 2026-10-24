@@ -112,6 +112,10 @@ impl PaneArm for CodexArm {
         // An unreachable daemon stores None - distinct from empty, which
         // would let a loaded stranger bind (codex_pane.py:151-159).
         store_baseline(capture_baseline(ctx));
+        // Pre-trust the launch cwd (`simple.rs`'s agy twin): the pane reaches
+        // its prompt instead of parking on the folder-trust modal, whose row
+        // carries no session id and stalled every spawn read behind it.
+        ensure_codex_folder_trust(&ctx.cwd);
         Ok(build_wrapped(ctx))
     }
 
@@ -208,6 +212,50 @@ fn is_code_payload(message: &str) -> bool {
         .split_whitespace()
         .next()
         .is_some_and(|word| CODE_PAYLOAD_PREFIXES.contains(&word))
+}
+
+/// `ensure_agy_folder_trust`'s codex twin (`simple.rs`): best-effort upsert
+/// of the launch cwd's trust key in `$CODEX_HOME/config.toml`, so a fresh
+/// worker reaches its prompt instead of parking on the folder-trust modal.
+/// Best-effort like the agy twin: any failure returns false and the pane
+/// spawns anyway. A malformed existing config is left untouched rather than
+/// clobbered.
+fn ensure_codex_folder_trust(cwd: &std::path::Path) -> bool {
+    let Some(home) = crate::codex_store::codex_home() else {
+        return false;
+    };
+    let config = home.join("config.toml");
+    let text = std::fs::read_to_string(&config).unwrap_or_default();
+    let Ok(mut doc) = text.parse::<toml_edit::DocumentMut>() else {
+        return false;
+    };
+    let key = cwd.to_string_lossy().to_string();
+    // A `projects` key that is not a table means the config is not the shape
+    // codex reads; refuse rather than index through or replace it.
+    if doc.get("projects").is_some_and(|p| !p.is_table_like()) {
+        return false;
+    }
+    let trusted = doc
+        .get("projects")
+        .and_then(|p| p.get(&key))
+        .and_then(|t| t.get("trust_level"))
+        .and_then(|v| v.as_str())
+        .is_some_and(|v| v == "trusted");
+    if trusted {
+        return true;
+    }
+    doc["projects"][&key]["trust_level"] = toml_edit::value("trusted");
+    write_atomic(&config, &doc.to_string()).is_ok()
+}
+
+/// Temp file plus rename: two stops of one session never leave a torn file.
+fn write_atomic(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
+    std::fs::write(&tmp, text)?;
+    std::fs::rename(&tmp, path)
 }
 
 /// The wrapped provider argv and its held seed, byte-parity-checked against

@@ -45,7 +45,7 @@ mod posture;
 mod peer_blocked;
 
 #[path = "lead_checkin_prompt_parked.rs"]
-mod prompt_parked;
+pub(crate) mod prompt_parked;
 
 /// The numeric keys this command owns and diffs versus the previous beat.
 const NUMERIC_DIFF_KEYS: [&str; 11] = [

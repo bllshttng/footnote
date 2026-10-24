@@ -6384,6 +6384,23 @@ event_types:
           type: integer
         total:
           type: integer
+  - name: trust_prompt_answered
+    description: "The daemon answered a fno-spawned codex pane's folder-trust modal itself: the modal's first option trusts the worker's own launch cwd. One event per attempt; sent names whether the keystroke landed. Every other parked prompt (approvals, permissions) stays report-only."
+    sources: [daemon]
+    data:
+      required: [pane_id, answer, sent]
+      properties:
+        holder:
+          type: string
+          description: "The parked worker's registry name; 'unknown' when the join lost it."
+        pane_id:
+          type: integer
+        answer:
+          type: string
+          description: "The keystroke pressed, the modal's first option (typically '1')."
+        sent:
+          type: boolean
+          description: "True when the pane write landed; a false value retries after the interval floor."
         reason:
           type: string
 

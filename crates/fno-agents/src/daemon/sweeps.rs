@@ -195,3 +195,203 @@ pub fn sweep_all_roots(home: &AgentsHome) -> Option<(usize, usize, usize)> {
     }
     Some((unparked, handled, total))
 }
+
+/// How long between trust-answer passes. A codex pane parked on the
+/// folder-trust modal blocks its worker entirely (one sat six hours), so the
+/// floor is tick magnitude, not the maintenance-sweep minutes.
+pub(crate) const TRUST_SWEEP_INTERVAL_SECS: i64 = 60;
+
+/// The codex folder-trust auto-answer: a fno-spawned codex pane parked on the
+/// folder-trust modal blocks its own worker, so the daemon answers the modal's
+/// first option itself - it trusts the worker's own launch cwd, the one the
+/// pane argv carries - and journals the answer, instead of waiting for a lead
+/// to read the check-in line. The subject is structural: the modal only ever
+/// asks about the `-C` cwd the pane launched with. Every other parked row
+/// (approvals, permissions) stays report-only: those remain a human's call.
+///
+/// The send closure is injected so the policy is testable without a mux.
+/// Emits one `trust_prompt_answered` event per attempt, `sent` naming whether
+/// the keystroke landed; a failed send waits one interval and retries.
+pub(crate) fn trust_answer_sweep(
+    home: &AgentsHome,
+    emitter: &EventEmitter,
+    now: i64,
+    send: &dyn Fn(u64, &str) -> bool,
+) -> usize {
+    let stamp = home.root().join("trust-answer.stamp");
+    let last = std::fs::read_to_string(&stamp)
+        .ok()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .unwrap_or(0);
+    if now.saturating_sub(last) < TRUST_SWEEP_INTERVAL_SECS {
+        return 0;
+    }
+    let _ = std::fs::write(&stamp, now.to_string());
+    let Ok(reading) = crate::lead_checkin::prompt_parked::reading() else {
+        return 0;
+    };
+    let Some(rows) = reading.get("rows").and_then(Value::as_array) else {
+        return 0;
+    };
+    let mut answered = 0usize;
+    for row in rows {
+        if row.get("rule_id").and_then(Value::as_str) != Some("trust_prompt")
+            || row.get("harness").and_then(Value::as_str) != Some("codex")
+        {
+            continue;
+        }
+        let Some(key) = row.get("answer_key").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(pane) = row.get("pane_id").and_then(Value::as_u64) else {
+            continue;
+        };
+        let sent = send(pane, key);
+        if sent {
+            answered += 1;
+        }
+        let _ = emitter.emit(
+            "trust_prompt_answered",
+            &json!({
+                "holder": row.get("holder").and_then(Value::as_str).unwrap_or("unknown"),
+                "pane_id": pane,
+                "answer": key,
+                "sent": sent,
+            }),
+        );
+    }
+    answered
+}
+
+#[cfg(test)]
+mod trust_sweep_tests {
+    use super::*;
+
+    // The auto-answer: a codex pane parked on the folder-trust modal is
+    // answered with its pinned key and the attempt is journaled; a claude
+    // permission row is never answered; the 60s interval floor holds.
+    #[test]
+    fn the_daemon_answers_a_parked_codex_trust_modal_and_journals_it() {
+        let _lock = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home_dir = tempfile::tempdir().unwrap();
+        let saved_home = std::env::var_os("FNO_AGENTS_HOME");
+        let saved_bin = std::env::var_os("FNO_BIN");
+        std::env::set_var("FNO_AGENTS_HOME", home_dir.path());
+        let events = home_dir.path().join("events-test.jsonl");
+        let emitter = EventEmitter::new(&events, "daemon");
+
+        // Registry: one live codex row joined to the stub pane.
+        let reg = crate::state::Registry {
+            entries: vec![{
+                let mut e = crate::state::RegistryEntry::default();
+                e.name = "trust-me".into();
+                e.harness = Some("codex".into());
+                e.status = crate::AgentStatus::Live;
+                e.fno_id = Some("fid-77".into());
+                e.cwd = "/tmp/trust-target".into();
+                e
+            }],
+            ..Default::default()
+        };
+        crate::registry_store::seed_raw(
+            AgentsHome::from_env().registry_json(),
+            serde_json::to_string(&reg).unwrap(),
+        );
+
+        // Stub mux: pane 9 shows the codex 1.x trust modal; the \\n pairs
+        // reach printf as literal backslash-n, the JSON escape for newline.
+        let script = r#"#!/bin/sh
+case "$1 $2" in
+  "mux pane")
+    if [ "$3" = "ls" ]; then
+      printf '[{"pane_id": 9, "fno_id": "fid-77"}]\n'
+    else
+      printf '{"text": "Folder access\\n/tmp\\nTrust this folder?\\n\\n› 1. Trust and continue\\n  2. Back to Agent Command Center"}\n'
+    fi
+    ;;
+  *) exit 3 ;;
+esac
+"#;
+        let stub = crate::write_exec_stub(home_dir.path(), "fno-stub", script);
+        std::env::set_var("FNO_BIN", &stub);
+
+        let sent = std::sync::Mutex::new(None);
+        let home = AgentsHome::from_env();
+        let answered = trust_answer_sweep(&home, &emitter, 1_000, &|pane, key| {
+            *sent.lock().unwrap() = Some((pane, key.to_string()));
+            true
+        });
+        assert_eq!(answered, 1);
+        assert_eq!(
+            sent.lock().unwrap().as_ref(),
+            Some(&(9u64, "1".to_string()))
+        );
+
+        // The journal names the row, the pane, the answer, and the landing;
+        // the store commit is the emitter's acknowledgement boundary.
+        let store = crate::event_store::store_path(&events);
+        let conn = crate::event_store::open_read(&store).unwrap();
+        let line: String = conn
+            .query_row(
+                "SELECT line FROM events WHERE type = 'trust_prompt_answered'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("the answer is journaled");
+        assert!(line.contains("\"sent\":true"), "{line}");
+        assert!(line.contains("\"holder\":\"trust-me\""), "{line}");
+
+        // The interval floor: a pass 59s later answers nothing.
+        let again = trust_answer_sweep(&home, &emitter, 1_059, &|_, _| {
+            panic!("the floor holds");
+        });
+        assert_eq!(again, 0);
+
+        // A claude permission row is report-only, never auto-answered.
+        let reg = crate::state::Registry {
+            entries: vec![{
+                let mut e = crate::state::RegistryEntry::default();
+                e.name = "claude-ask".into();
+                e.harness = Some("claude".into());
+                e.status = crate::AgentStatus::Live;
+                e.fno_id = Some("fid-88".into());
+                e.cwd = "/tmp/claude-target".into();
+                e
+            }],
+            ..Default::default()
+        };
+        crate::registry_store::seed_raw(
+            AgentsHome::from_env().registry_json(),
+            serde_json::to_string(&reg).unwrap(),
+        );
+        let script = r#"#!/bin/sh
+case "$1 $2" in
+  "mux pane")
+    if [ "$3" = "ls" ]; then
+      printf '[{"pane_id": 12, "fno_id": "fid-88"}]\n'
+    else
+      printf '{"text": "Do you want to proceed?\\n  ❯ 1. Yes\\n  2. No"}\n'
+    fi
+    ;;
+  *) exit 3 ;;
+esac
+"#;
+        let stub = crate::write_exec_stub(home_dir.path(), "fno-stub-2", script);
+        std::env::set_var("FNO_BIN", &stub);
+        let answered = trust_answer_sweep(&home, &emitter, 1_060, &|_, _| {
+            panic!("claude approvals are never auto-answered");
+        });
+        assert_eq!(answered, 0);
+
+        match saved_home {
+            Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
+            None => std::env::remove_var("FNO_AGENTS_HOME"),
+        }
+        match saved_bin {
+            Some(v) => std::env::set_var("FNO_BIN", v),
+            None => std::env::remove_var("FNO_BIN"),
+        }
+    }
+}

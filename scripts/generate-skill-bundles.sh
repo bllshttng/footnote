@@ -95,12 +95,17 @@ fi
 # verified, is not bundled. Returns 0 pass, 1 fail, 2 unverifiable.
 _verify_pack() {
   local manifest="$1"
+  local out
   # Prefer the IN-TREE fno-py: it reflects the current source (the installed
   # `fno` can be stale and reject a manifest field this branch added).
   if command -v uv >/dev/null 2>&1; then
-    uv run --project "$SOURCE_ROOT/cli" fno-py plugins verify "$manifest" >/dev/null 2>&1 || return 1
+    out=$(uv run --project "$SOURCE_ROOT/cli" fno-py plugins verify "$manifest" 2>&1) && return 0
+    printf '%s\n' "$out" >&2
+    return 1
   elif command -v fno >/dev/null 2>&1; then
-    fno config plugins verify "$manifest" >/dev/null 2>&1 || return 1
+    out=$(fno config plugins verify "$manifest" 2>&1) && return 0
+    printf '%s\n' "$out" >&2
+    return 1
   else
     return 2
   fi

@@ -105,13 +105,20 @@ send = "digit"
 # list in scrollback has no "›" before those digits, so it can't fake the gate
 # and get its own list turned into answer-queue choices that inject "1"/"2" into
 # the idle composer (codex review P2). A bare auth wall keeps its auth_wall fallback.
+# Codex 1.x reworded the modal ("Folder access / <path> / Trust this folder?"
+# over "› 1. Trust and continue" / "2. Back to Agent Command Center"), so the
+# question arm carries both spellings.
 [[rule]]
 id = "trust_prompt"
 state = "blocked"
 priority = 985
 region = "bottom_non_empty_lines(10)"
 gate = { all = [
-  { any = [ { contains = "Do you trust" }, { contains = "do you trust" } ] },
+  { any = [
+    { contains = "Do you trust" },
+    { contains = "do you trust" },
+    { contains = "Trust this folder" },
+  ] },
   { line_regex = '^\s*\x{203a}\s*[0-9]\.\s' },
 ] }
 [rule.answer]

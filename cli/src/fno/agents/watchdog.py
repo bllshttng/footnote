@@ -1466,17 +1466,21 @@ def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]
             )
         )
         seen_row_ids.add(row_id)
+    # Advisory, never blocking: an unattributable row is unmeasurable
+    # liveness, so the read answers from the rows it can vouch for instead of
+    # refusing (one stuck no-provenance pane blanked the unplanned queue).
+    # The summary literal is the msg-twin the reachable-paths ratchet
+    # baselines; the prefix rides a second interpolation so the literal
+    # stays intact on both legs.
     if skipped_no_sid:
-        warnings = [
-            *warnings,
-            f"{skipped_no_sid} row(s) carried no session id, unmeasurable, skipped",
-        ]
+        summary = f"{skipped_no_sid} row(s) carried no session id, unmeasurable, skipped"
+        warnings = [*warnings, f"{ADVISORY_WARNING_PREFIX}{summary}"]
     if skipped_nonclaude_no_id:
-        warnings = [
-            *warnings,
+        summary = (
             f"{skipped_nonclaude_no_id} non-claude row(s) carried no session id, "
-            "unmeasurable, skipped",
-        ]
+            "unmeasurable, skipped"
+        )
+        warnings = [*warnings, f"{ADVISORY_WARNING_PREFIX}{summary}"]
     warnings = [*warnings, *sorted(unmapped_states)]
     return out, warnings
 

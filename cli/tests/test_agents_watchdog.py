@@ -2417,13 +2417,16 @@ def test_an_attributable_no_sid_row_is_advisory_and_named(monkeypatch):
     assert not any("carried no session id" in w for w in warnings)
 
 
-def test_an_unattributable_no_sid_row_still_warns_blocking(monkeypatch):
-    """Without a node attribution the row is unknowable liveness: the
-    blocking warning stays, so read_roster fails closed (x-ae54 posture)."""
+def test_an_unattributable_no_sid_row_skips_advisory_and_stays_consulted(monkeypatch):
+    """Without a node attribution the row is unknowable liveness: it skips,
+    the summary warns advisory-classified, and the reading stays consulted.
+    The summary once read as blocking, so one stuck no-provenance pane
+    blanked the unplanned queue for every lead."""
     from types import SimpleNamespace
 
     from fno.agents.harnesses import claude as claude_mod
     from fno.agents import registry as registry_mod
+    from fno.claims import roster
 
     monkeypatch.setattr(claude_mod, "claude_agents_rows", lambda **k: ([], []))
     row = SimpleNamespace(
@@ -2434,7 +2437,14 @@ def test_an_unattributable_no_sid_row_still_warns_blocking(monkeypatch):
     monkeypatch.setattr(registry_mod, "load_registry", lambda: [row])
     rows, warnings = watchdog.fleet_rows()
     assert rows == []
-    assert any("carried no session id" in w for w in warnings)
+    summary = next(w for w in warnings if "carried no session id" in w)
+    assert summary.startswith(watchdog.ADVISORY_WARNING_PREFIX)
+
+    # The classifier half: an advisory-classified summary never refuses the
+    # reading.
+    monkeypatch.setattr(watchdog, "fleet_rows", lambda timeout=10.0: (rows, warnings))
+    reading = roster.read_roster(require_live_probe=False)
+    assert reading.consulted is True
 
 
 def test_stale_reset_default_report_carries_provider_outages(monkeypatch, capsys):
