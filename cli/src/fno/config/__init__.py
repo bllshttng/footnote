@@ -3641,6 +3641,14 @@ class MuxBlock(BaseModel):
     open_with: Literal["inmux", "obsidian", "system"] = "inmux"
     # The in-mux file viewer's shape: docked panel or centered modal.
     viewer: Literal["panel", "modal"] = "panel"
+    # Lines one wheel notch scrolls a pane whose app does NOT own the mouse;
+    # the Rust reader clamps 1..=50. A notch here is one cell of trackpad
+    # travel, so the default stays 1.
+    wheel_lines: int = Field(default=1, ge=1, le=50)
+    # Wheel ticks forwarded per 100ms window to a pane whose app DOES own the
+    # mouse; the Rust reader clamps 1..=100. The app scrolls its own step per
+    # forwarded tick, so this caps how fast a trackpad flick moves it.
+    wheel_passthrough_rate: int = Field(default=3, ge=1, le=100)
 
     @field_validator("shell_integration", mode="before")
     @classmethod

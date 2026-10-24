@@ -5,6 +5,10 @@ use crate::proto::{AgentRow, TemplateName};
 use crate::pty::ChildGuard;
 use crate::restore_gate::{set_restore_registry_rows, RestoreRegistryRowsGuard};
 use crate::server::mouse_route::{bounded_scroll_target, MOUSE_WHEEL_LINES};
+use crate::server::pane_scroll::{wheel_gate, WHEEL_GATE_BUDGET, WHEEL_GATE_WINDOW};
+
+#[path = "server_tests/pane_scroll_tests.rs"]
+mod pane_scroll_tests;
 
 #[path = "server/server_thread_viewer_tests.rs"]
 mod thread_viewer_tests;
@@ -7957,151 +7961,6 @@ fn rerun_guard_is_scoped_to_the_current_session() {
 
 // -- x-9454 wheel-passthrough rate gate --------------------------------
 
-// AC1-HP / AC2-HP: a 30-tick same-direction flood inside one window
-// forwards at most WHEEL_GATE_BUDGET; ticks spaced past the window all pass.
-#[test]
-fn wheel_gate_bounds_flood_and_passes_notch_rate() {
-    let mut g = HashMap::new();
-    let t0 = Instant::now();
-    let allowed = (0..30)
-        .filter(|_| wheel_gate(&mut g, 7, MouseKind::WheelDown, t0))
-        .count();
-    assert_eq!(
-        allowed, WHEEL_GATE_BUDGET as usize,
-        "a same-window flood forwards exactly the budget, drops the rest"
-    );
-
-    // Notch rate: one tick per window, none dropped.
-    let mut g2 = HashMap::new();
-    let passed = (0..30)
-        .filter(|i| {
-            wheel_gate(
-                &mut g2,
-                7,
-                MouseKind::WheelDown,
-                t0 + WHEEL_GATE_WINDOW * (*i as u32),
-            )
-        })
-        .count();
-    assert_eq!(passed, 30, "notch-rate input is forwarded 1:1");
-}
-
-// AC1-EDGE: exactly budget ticks pass, the (budget+1)th in the window drops.
-#[test]
-fn wheel_gate_exact_budget_boundary() {
-    let mut g = HashMap::new();
-    let t0 = Instant::now();
-    for i in 0..WHEEL_GATE_BUDGET {
-        assert!(
-            wheel_gate(&mut g, 1, MouseKind::WheelUp, t0),
-            "tick {i} within budget forwards"
-        );
-    }
-    assert!(
-        !wheel_gate(&mut g, 1, MouseKind::WheelUp, t0),
-        "the tick past budget drops"
-    );
-}
-
-// AC1-UI: a reversal mid-flood forwards immediately and resets the budget.
-#[test]
-fn wheel_gate_reversal_passes_immediately() {
-    let mut g = HashMap::new();
-    let t0 = Instant::now();
-    // Exhaust the down budget so drops are occurring.
-    for _ in 0..WHEEL_GATE_BUDGET {
-        wheel_gate(&mut g, 1, MouseKind::WheelDown, t0);
-    }
-    assert!(
-        !wheel_gate(&mut g, 1, MouseKind::WheelDown, t0),
-        "same-direction is dropping"
-    );
-    assert!(
-        wheel_gate(&mut g, 1, MouseKind::WheelUp, t0),
-        "the opposite tick forwards immediately (reversal is fresh intent)"
-    );
-    // Reversal reset the window: a fresh up budget is available.
-    for _ in 1..WHEEL_GATE_BUDGET {
-        assert!(wheel_gate(&mut g, 1, MouseKind::WheelUp, t0));
-    }
-    assert!(
-        !wheel_gate(&mut g, 1, MouseKind::WheelUp, t0),
-        "the reset up budget then exhausts"
-    );
-}
-
-// AC1-FR: a tick at or after exactly window_start + window re-admits
-// (no permanent mute), testing the boundary instant itself.
-#[test]
-fn wheel_gate_readmits_at_window_boundary() {
-    let mut g = HashMap::new();
-    let t0 = Instant::now();
-    for _ in 0..WHEEL_GATE_BUDGET {
-        wheel_gate(&mut g, 1, MouseKind::WheelDown, t0);
-    }
-    assert!(
-        !wheel_gate(&mut g, 1, MouseKind::WheelDown, t0),
-        "budget exhausted inside the window"
-    );
-    assert!(
-        wheel_gate(&mut g, 1, MouseKind::WheelDown, t0 + WHEEL_GATE_WINDOW),
-        "the exact boundary instant counts as a fresh window and forwards"
-    );
-}
-
-// AC2-ERR: a now behind window_start (virtualized clock) saturates instead
-// of panicking, and treats the tick as inside the window.
-#[test]
-fn wheel_gate_clock_skew_saturates() {
-    let mut g = HashMap::new();
-    let t0 = Instant::now() + WHEEL_GATE_WINDOW * 10;
-    assert!(wheel_gate(&mut g, 1, MouseKind::WheelDown, t0));
-    // A now BEFORE the stored window_start: saturating_duration_since is 0,
-    // so the tick is inside the window and consumes budget (never panics).
-    let earlier = t0 - WHEEL_GATE_WINDOW * 5;
-    for _ in 1..WHEEL_GATE_BUDGET {
-        assert!(wheel_gate(&mut g, 1, MouseKind::WheelDown, earlier));
-    }
-    assert!(
-        !wheel_gate(&mut g, 1, MouseKind::WheelDown, earlier),
-        "skewed-early ticks stay inside the window and hit the budget"
-    );
-}
-
-// Per-pane independence: one pane's flood never spends another's budget.
-#[test]
-fn wheel_gate_per_pane() {
-    let mut g = HashMap::new();
-    let t0 = Instant::now();
-    for _ in 0..WHEEL_GATE_BUDGET {
-        wheel_gate(&mut g, 1, MouseKind::WheelDown, t0);
-    }
-    assert!(!wheel_gate(&mut g, 1, MouseKind::WheelDown, t0));
-    assert!(
-        wheel_gate(&mut g, 2, MouseKind::WheelDown, t0),
-        "a different pane draws from its own budget"
-    );
-}
-
-// AC2-EDGE: reaping a pane drops its gate entry (touch_last_emit pattern).
-#[test]
-fn reap_pane_clears_wheel_gate() {
-    let mut core = empty_core();
-    core.wheel_gate.insert(
-        42,
-        WheelGateState {
-            window_start: Instant::now(),
-            count: 3,
-            dir: MouseKind::WheelDown,
-        },
-    );
-    core.reap_pane(42);
-    assert!(
-        !core.wheel_gate.contains_key(&42),
-        "the closed pane's gate entry is removed"
-    );
-}
-
 #[test]
 fn node_id_shape_check() {
     assert!(node_id_shaped("x-aff6"));
@@ -8158,6 +8017,8 @@ pub(super) fn empty_core() -> Core {
         claims: HashMap::new(),
         touch_last_emit: HashMap::new(),
         wheel_gate: HashMap::new(),
+        wheel_lines: 1,
+        wheel_passthrough_rate: 3,
         fno_token_claims: HashMap::new(),
         link_click_claims: HashMap::new(),
         touch_emit_failures: Arc::new(AtomicU64::new(0)),
@@ -8481,6 +8342,7 @@ fn bye_flushes_the_final_dirty_frame_first() {
                 cursor_col: 0,
                 cursor_visible: true,
                 scroll_offset: 0,
+                history_lines: 0,
             };
             dirty.lock().unwrap().insert(7, frame.clone());
             let stats: PaneStats = Arc::default();

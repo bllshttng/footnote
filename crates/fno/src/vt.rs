@@ -411,6 +411,8 @@ impl Pane {
         // it (tmux copy-mode behavior) keeps a stale caret from rendering in
         // history. At offset 0 the cursor row is unchanged.
         let scrolled = offset != 0;
+        let history_lines =
+            (grid.history_size() as u64 + self.rows as u64).min(u32::MAX as u64) as u32;
         Frame {
             rows: self.rows,
             cols: self.cols,
@@ -419,6 +421,7 @@ impl Pane {
             cursor_col: cursor_point.column.0 as u16,
             cursor_visible: !scrolled && self.term.mode().contains(TermMode::SHOW_CURSOR),
             scroll_offset: offset.max(0).min(u16::MAX as i32) as u16,
+            history_lines,
         }
     }
 
@@ -444,6 +447,13 @@ impl Pane {
     /// calls this so input always lands on the visible line (Invariant).
     pub fn scroll_to_bottom(&mut self) {
         self.term.scroll_display(Scroll::Bottom);
+    }
+
+    /// Anchor the viewport at the oldest history line (scroll-mode `g`).
+    /// Same alacritty clamp family as `scroll` - no panic at any history
+    /// size; a zero-history pane is already at the top.
+    pub fn scroll_to_top(&mut self) {
+        self.term.scroll_display(Scroll::Top);
     }
 
     /// Lines currently scrolled above the live bottom; 0 = live. Drives the
@@ -2969,6 +2979,27 @@ mod tests {
         assert!(off > 0, "scrolled up");
         // A second huge scroll is idempotent at the clamp.
         assert_eq!(pane.scroll(1_000_000), off, "clamped at history top");
+
+        // Scroll-mode `g` + readout math: scroll_to_top anchors at the SAME
+        // clamp a huge relative scroll reaches (the history size is the
+        // grid's own count, so the test reads it rather than recomputes it),
+        // and the frame carries the denominator: history plus viewport
+        // total, so the viewport's top line reads `line 1 of total`.
+        let mut pane = Pane::new(4, 20);
+        for i in 0..30 {
+            pane.feed(format!("row{i}\r\n").as_bytes());
+        }
+        pane.scroll_to_top();
+        let top = pane.display_offset();
+        assert!(top > 0, "top = the full history");
+        let f = pane.frame();
+        assert_eq!(
+            f.history_lines as usize,
+            top + f.rows as usize,
+            "history + viewport"
+        );
+        let n = f.history_lines as i64 - f.rows as i64 - f.scroll_offset as i64 + 1;
+        assert_eq!(n, 1, "at the top the viewport starts at line 1");
 
         // AC1-UI: the cursor is hidden off-live; offset is the indicator source.
         let mut pane = Pane::new(4, 20);

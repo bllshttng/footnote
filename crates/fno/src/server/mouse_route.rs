@@ -23,8 +23,9 @@ use crate::vt::Modes;
 /// one notch per physical click and a 1:1 step feels sluggish. It is 3x too
 /// fast for a trackpad, and SGR reports both as button 64/65 with nothing to
 /// tell them apart - so this favors the trackpad, the common case. A wheel-mouse
-/// operator wanting a coarser step is the config knob this deliberately does not
-/// have yet; add it when someone asks, not on speculation.
+/// operator wanting a coarser step sets `config.mux.wheel_lines`
+/// ([`crate::digest_overlay::wheel_lines`]); this const stays the routing
+/// step the configured multiplier applies at [`Core::scroll_delta`].
 pub(super) const MOUSE_WHEEL_LINES: i32 = 1;
 
 /// What the server does with a mouse event, decided purely from the pane's

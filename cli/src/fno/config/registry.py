@@ -462,6 +462,8 @@ FIELD_META: dict[str, Meta] = {
     ),
     "mux.open_with": Meta("advanced", "Where a clicked file path opens: inmux (default; text, source files, images and PDFs open in the mux viewer, other files in the platform opener) | obsidian (files under the configured vault open in Obsidian, others fall back to system) | system (the platform opener). Read by the Rust client.", default_source="default"),
     "mux.viewer": Meta("advanced", "Shape of the in-mux file viewer: panel (default, docks at the right edge) | modal. Read by the Rust client.", default_source="default"),
+    "mux.wheel_lines": Meta("advanced", "Lines one wheel notch scrolls a pane whose app does NOT own the mouse (default 1). A notch here is one cell of trackpad travel; a wheel-mouse user wanting the classic 3-detent step sets 3. Read once at mux server birth.", default_source="default"),
+    "mux.wheel_passthrough_rate": Meta("advanced", "Wheel ticks forwarded per 100ms to a pane whose app DOES own the mouse (default 3). The app scrolls its own step per tick, so this caps how fast a trackpad flick moves a Claude Code / Codex pane. Raise it if a deliberate notch scroll ever drops.", default_source="default"),
     # --- config.split.* ---
     "split.opens": Meta("advanced", "Where the mux row menu's Split Direction toggle starts: pane (default) | portal. The t key flips it inside the open menu, and the flip lands here.", default_source="default"),
     # --- config.dev.* (: maintainer local-dev) ---

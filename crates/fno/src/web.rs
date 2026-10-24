@@ -3047,6 +3047,7 @@ console.log("recent searches: 12 cases ok");
             cursor_col: 0,
             cursor_visible: false,
             scroll_offset: 0,
+            history_lines: 0,
         }
     }
 

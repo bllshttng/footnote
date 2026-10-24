@@ -74,6 +74,12 @@ pub(super) async fn serve(
         claims: HashMap::new(),
         touch_last_emit: HashMap::new(),
         wheel_gate: HashMap::new(),
+        wheel_lines: crate::digest_overlay::wheel_lines(
+            &std::env::current_dir().unwrap_or_default(),
+        ),
+        wheel_passthrough_rate: crate::digest_overlay::wheel_passthrough_rate(
+            &std::env::current_dir().unwrap_or_default(),
+        ),
         fno_token_claims: HashMap::new(),
         link_click_claims: HashMap::new(),
         touch_emit_failures: Arc::new(AtomicU64::new(0)),

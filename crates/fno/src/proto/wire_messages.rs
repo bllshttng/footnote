@@ -150,6 +150,21 @@ pub enum ClientMsg {
     SearchClear {
         pane: u64,
     },
+    /// (v118) Keyboard scroll mode (prefix+PgUp): move the pane's SHARED
+    /// per-pane scroll `delta` lines, positive up into history, negative
+    /// toward live. The same offset the wheel drives, so co-viewers track.
+    /// Clamped server-side at the history top / live bottom; each move
+    /// broadcasts a `Frame`.
+    PaneScroll {
+        pane: u64,
+        delta: i32,
+    },
+    /// (v118) Scroll-mode edge jump: `top` anchors the viewport at the oldest
+    /// history line, else snaps to the live bottom (g / G in scroll mode).
+    PaneScrollEdge {
+        pane: u64,
+        top: bool,
+    },
     /// (v83, ) The sideline new-agent popup submits one typed launch
     /// request. The server validates pre-birth, shells canonical
     /// `fno agents spawn` OFF the core loop, and answers this client with

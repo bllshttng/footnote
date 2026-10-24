@@ -153,6 +153,24 @@ pub(super) async fn client_reader(mut r: OwnedReadHalf, core_tx: mpsc::Sender<Co
                     break;
                 }
             }
+            Ok(ClientMsg::PaneScroll { pane, delta }) => {
+                if core_tx
+                    .send(CoreMsg::PaneScroll { id, pane, delta })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Ok(ClientMsg::PaneScrollEdge { pane, top }) => {
+                if core_tx
+                    .send(CoreMsg::PaneScrollEdge { id, pane, top })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
             Ok(ClientMsg::PaneAnswer {
                 pane,
                 fingerprint,

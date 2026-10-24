@@ -126,6 +126,7 @@ mod tests {
             cursor_col: 0,
             cursor_visible: true,
             scroll_offset: 0,
+            history_lines: 0,
         }
     }
 

@@ -373,10 +373,8 @@ pub(super) fn text_frame(rows: u16, cols: u16, ch: char) -> Frame {
             };
             rows as usize * cols as usize
         ],
-        cursor_row: 0,
-        cursor_col: 0,
         cursor_visible: true,
-        scroll_offset: 0,
+        ..Default::default()
     }
 }
 
@@ -14029,10 +14027,8 @@ fn a_long_name_wraps_so_the_whole_name_and_cursor_show() {
             rows: rows as u16,
             cols: cols as u16,
             cells: cells.to_vec(),
-            cursor_row: 0,
-            cursor_col: 0,
             cursor_visible: false,
-            scroll_offset: 0,
+            ..Default::default()
         })
     };
     let shot = screen(&cells);

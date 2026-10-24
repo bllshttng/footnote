@@ -130,6 +130,12 @@ pub(super) async fn route(
     if view.recruit.is_some() {
         return Some(recruit_keys(view, bytes, sock_w).await);
     }
+    if view.scroll_mode {
+        // Keyboard scroll mode owns the keyboard exactly like search: the
+        // prefix chords do not resolve mid-mode, so nothing typed here can
+        // leak into the pane.
+        return Some(scroll_mode::scroll_mode_keys(view, bytes, sock_w).await);
+    }
     if view.search.is_some() {
         return Some(search_keys(view, bytes, sock_w).await);
     }

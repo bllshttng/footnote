@@ -6,6 +6,37 @@
 use super::*;
 
 impl View {
+    /// Paint the in-scrollback search line over the bottom row (v12).
+    /// Blank first so the divider-fill pass cannot bleed through (gotcha).
+    /// Typing shows `/query_`; browsing shows `[i/n] /query` or `/query - no
+    /// matches` (total 0). Moved here beside its one caller (file budget).
+    pub(super) fn draw_search_line(
+        _view: &View,
+        cells: &mut [Cell],
+        rows: usize,
+        cols: usize,
+        sv: &SearchView,
+    ) {
+        let r = rows - 1;
+        for c in 0..cols {
+            cells[r * cols + c] = Cell::default();
+        }
+        let text = match sv.result {
+            Some((0, _)) => format!(" /{} - no matches", sv.query),
+            Some((total, current)) => format!(" [{current}/{total}] /{}", sv.query),
+            // Typing, or submitted but awaiting the first reply: show the input.
+            None => format!(" /{}_", sv.query),
+        };
+        for (i, ch) in text.chars().take(cols).enumerate() {
+            cells[r * cols + i] = Cell {
+                c: ch,
+                fg: Color::Default,
+                bg: Color::Default,
+                flags: cell_flags::BOLD,
+            };
+        }
+    }
+
     /// The bottom chrome line (US4). While a prefix chord is pending past
     /// [`HINT_DELAY`] it is the which-key hint (painted over whatever the row
     /// held - even with the status row toggled off, discoverability does not
@@ -29,6 +60,7 @@ impl View {
                 || self.move_to.is_some()
                 || self.recruit.is_some()
                 || self.search.is_some()
+                || self.scroll_mode
                 || self.hint
                 // The open row selector reserves the row its key hint
                 // paints: the hint is the discoverability the selector
@@ -98,10 +130,17 @@ impl View {
             return;
         }
         // Search line takes the bottom row when active (precedence: search >
-        // which-key hint > status row). It OVERLAYS whatever held the row - no
-        // reserved row, so opening search never triggered a Resize/reflow.
+        // scroll mode > which-key hint > status row). It OVERLAYS whatever
+        // held the row - no reserved row, so opening search never triggered a
+        // Resize/reflow.
         if let Some(sv) = &self.search {
-            self.draw_search_line(cells, rows, cols, sv);
+            Self::draw_search_line(self, cells, rows, cols, sv);
+            return;
+        }
+        // The scroll-mode readout, same overlay discipline as the search
+        // line: the mode's live position, painted over the row's last life.
+        if self.scroll_mode {
+            scroll_mode::draw_scroll_line(self, cells, rows, cols);
             return;
         }
         let r = rows - 1;

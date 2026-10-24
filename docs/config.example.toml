@@ -761,6 +761,10 @@ card_graph = "activity"
 open_with = "inmux"
 # Shape of the in-mux file viewer: panel (default, docks at the right edge) | modal. Read by the Rust client.
 viewer = "panel"
+# Lines one wheel notch scrolls a pane whose app does NOT own the mouse (default 1). A notch here is one cell of trackpad travel; a wheel-mouse user wanting the classic 3-detent step sets 3. Read once at mux server birth.
+wheel_lines = 1
+# Wheel ticks forwarded per 100ms to a pane whose app DOES own the mouse (default 3). The app scrolls its own step per tick, so this caps how fast a trackpad flick moves a Claude Code / Codex pane. Raise it if a deliberate notch scroll ever drops.
+wheel_passthrough_rate = 3
 
 [mux.restore]
 # Rebuild named held panes for pane-substrate workers after a mux server restart; focusing a held pane resumes its persisted harness session (default on).

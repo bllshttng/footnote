@@ -392,7 +392,10 @@ fn default_true() -> bool {
 /// v117: `ControlCommand::PaneRun.fno_id` (serde default), the caller's
 /// preassigned session id recorded as the pane's resume birthright so a
 /// spawned pane is addressable before its registry row exists; floor stays 58.
-pub const PROTO_VERSION: u32 = 117;
+/// v118: `ClientMsg::PaneScroll`/`PaneScrollEdge` (keyboard scroll mode,
+/// prefix+PgUp) and `Frame.history_lines` (serde default), the scroll-mode
+/// readout's denominator; floor stays 58.
+pub const PROTO_VERSION: u32 = 118;
 
 /// The oldest wire version this build can speak. Bumps that only add commands or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -2338,7 +2341,7 @@ pub struct SquadMeta {
 /// A complete rendered screen: `rows * cols` cells in row-major order plus the
 /// cursor. Self-contained by construction - drawing a `Frame` never requires
 /// any earlier message.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct Frame {
     pub rows: u16,
     pub cols: u16,
@@ -2351,6 +2354,12 @@ pub struct Frame {
     /// broadcast in the frame so every co-viewer shows the same indicator.
     #[serde(default)]
     pub scroll_offset: u16,
+    /// (v118) Total grid lines the pane can show, history plus viewport. With
+    /// `rows` and `scroll_offset` this is the scroll-mode readout's denominator:
+    /// the viewport's top line is `history_lines - rows - offset + 1` of
+    /// `history_lines`. `default` keeps an older server's frames decoding.
+    #[serde(default)]
+    pub history_lines: u32,
 }
 
 impl Frame {
@@ -3608,6 +3617,7 @@ mod tests {
             cursor_col: 2,
             cursor_visible: true,
             scroll_offset: 4,
+            history_lines: 0,
         }
     }
 
@@ -4113,7 +4123,7 @@ mod tests {
         // re-assert the same literal, which caught nothing a single pin does
         // not and turned every bump into a three-file edit; they now assert
         // only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 117);
+        assert_eq!(PROTO_VERSION, 118);
         // v64 added `PanePlacement.portal` and `AgentRow.portal`.
         // Both are additive `#[serde(default)]` fields, so the floor does NOT
         // move with them - a v63 client still attaches. Pinned beside the

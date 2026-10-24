@@ -81,6 +81,8 @@ mod human_input;
 mod keeper_adopt;
 pub(crate) mod lifecycle_target;
 mod mouse_route;
+mod pane_scroll;
+use pane_scroll::{wheel_gate, WheelGateState};
 mod notice;
 pub(crate) mod observers;
 mod open_link;
@@ -531,6 +533,22 @@ pub(crate) enum CoreMsg {
         id: u64,
         pane: u64,
         op: SearchOp,
+    },
+    /// (v118) Keyboard scroll mode (prefix+PgUp): move the pane's shared
+    /// scroll `delta` lines. Same shared-offset mutation class as BlockNav
+    /// and Search - every co-viewer tracks; `id` names the requester for a
+    /// pane-not-found notice.
+    PaneScroll {
+        id: u64,
+        pane: u64,
+        delta: i32,
+    },
+    /// (v118) Scroll-mode edge jump (g/G): anchor the viewport at the oldest
+    /// history line (`top`), else snap to the live bottom.
+    PaneScrollEdge {
+        id: u64,
+        pane: u64,
+        top: bool,
     },
     /// (v9) Answer a blocked prompt: re-verify the region fingerprint
     /// against the live grid, then inject the daemon-pinned `keystroke`. `id`
@@ -1550,6 +1568,16 @@ pub(crate) struct Core {
     /// ticks per window reach a mouse-owning pane PTY; purged with the pane
     /// in [`Core::reap_pane`], the `touch_last_emit` pattern.
     wheel_gate: HashMap<u64, WheelGateState>,
+    /// `config.mux.wheel_lines`: lines one wheel notch scrolls a
+    /// mux-interpreted pane (default 1). Latched once at Core build - the
+    /// theme/hover config latch pattern.
+    wheel_lines: i32,
+    /// `config.mux.wheel_passthrough_rate`: wheel ticks forwarded per
+    /// [`WHEEL_GATE_WINDOW`] to a mouse-owning pane's PTY (default 3). The
+    /// v118 drop from 12: a trackpad flick on a mouse-owning pane (Claude
+    /// Code, Codex) reads "too big, too fast" - the gate clips the flood
+    /// instead of forwarding every tick the app then multiplies.
+    wheel_passthrough_rate: u32,
     /// Per-pane claimed fno-token click pair `(row, col, client)`; see
     /// [`Core::claim_fno_token_click`]. Purged with the pane, `wheel_gate`'s
     /// pattern.
@@ -1732,68 +1760,6 @@ pub(crate) struct Core {
     /// the fill refuses and names both. Cleared when the seat fills live
     /// (ownership is then the reach's, not the store's).
     portal_session_guards: BTreeMap<u8, String>,
-}
-
-/// Wheel-passthrough rate gate: forward at most [`WHEEL_GATE_BUDGET`]
-/// wheel ticks per [`WHEEL_GATE_WINDOW`] to a mouse-owning pane's PTY. A
-/// physical notch stream (a few ticks/s) never gates; only a trackpad flood
-/// (hundreds/s) clips. 12 ticks / 100ms is a ~120 ticks/s ceiling.
-/// ponytail: too low and fast-redrawing apps (vim) feel sluggish - raise the
-/// budget if a deliberate notch scroll ever drops.
-const WHEEL_GATE_WINDOW: Duration = Duration::from_millis(100);
-const WHEEL_GATE_BUDGET: u32 = 12;
-
-/// Per-pane wheel-gate state: the current window's start, ticks forwarded in
-/// it, and the direction of the last forwarded tick (a reversal is fresh
-/// intent and resets the window - brief Locked 3).
-#[derive(Debug)]
-struct WheelGateState {
-    window_start: Instant,
-    count: u32,
-    dir: MouseKind,
-}
-
-/// Whether a wheel `dir` tick for `pane` should be forwarded now, recording
-/// `now`. Pure over the state map (injected `Instant`, `touch_coalesce`
-/// pattern) so it is PTY-free unit-testable. Rules: a direction reversal or an
-/// expired window (at or after the boundary instant - no permanent mute,
-/// AC1-FR) resets to a fresh budget and allows; under budget allows; else
-/// drops. Drops only - forwarded ticks keep arrival order (brief Locked 5).
-fn wheel_gate(
-    gate: &mut HashMap<u64, WheelGateState>,
-    pane: u64,
-    dir: MouseKind,
-    now: Instant,
-) -> bool {
-    match gate.entry(pane) {
-        std::collections::hash_map::Entry::Occupied(mut e) => {
-            let st = e.get_mut();
-            // saturating: a `now` behind window_start (virtualized clock skew)
-            // treats the tick as inside the window instead of panicking.
-            if st.dir != dir || now.saturating_duration_since(st.window_start) >= WHEEL_GATE_WINDOW
-            {
-                *st = WheelGateState {
-                    window_start: now,
-                    count: 1,
-                    dir,
-                };
-                true
-            } else if st.count < WHEEL_GATE_BUDGET {
-                st.count += 1;
-                true
-            } else {
-                false
-            }
-        }
-        std::collections::hash_map::Entry::Vacant(v) => {
-            v.insert(WheelGateState {
-                window_start: now,
-                count: 1,
-                dir,
-            });
-            true
-        }
-    }
 }
 
 /// Whether a stored layout slot binds a done member. Bindings name
@@ -8225,46 +8191,6 @@ impl Core {
             .fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
 
-    /// The line delta an interpreted wheel-scroll applies, or `None` when the
-    /// event isn't a mux-interpreted scroll (a mouse-app passthrough, a select, or
-    /// an ignore). The core drain folds a contiguous run of wheel ticks on one
-    /// pane - including a direction reversal queued behind in-flight opposite
-    /// ticks - into a single broadcast, so a fast trackpad flick settles in one
-    /// frame instead of rubber-banding through every intermediate offset.
-    fn scroll_delta(&self, pane: u64, event: &MouseEvent) -> Option<i32> {
-        let modes = self.panes.get(&pane)?.vt.modes();
-        match route_mouse(modes, event.kind) {
-            MouseAction::Scroll(delta) => Some(delta),
-            _ => None,
-        }
-    }
-
-    /// Apply one wheel tick to a pane WITHOUT broadcasting, returning the
-    /// resulting scroll offset. The drain applies a queued run tick-by-tick so
-    /// `vt.scroll`'s per-tick clamp at the history top / live bottom is preserved
-    /// - the algebraic net would wrongly cancel a tick that clamped, losing a
-    /// reversal at a boundary - then broadcasts once. `0` if the pane is gone.
-    fn scroll_tick(&mut self, pane: u64, delta: i32) -> usize {
-        self.panes.get_mut(&pane).map_or(0, |e| e.vt.scroll(delta))
-    }
-
-    /// The pane's current scroll offset (0 = live bottom), or 0 if it's gone.
-    fn scroll_offset(&self, pane: u64) -> usize {
-        self.panes.get(&pane).map_or(0, |e| e.vt.display_offset())
-    }
-
-    /// The pane's viewport height in rows (0 if gone), the per-fold scroll cap.
-    fn pane_rows(&self, pane: u64) -> u16 {
-        self.panes.get(&pane).map_or(0, |e| e.vt.size().0)
-    }
-
-    /// Apply a single interpreted wheel tick and push one frame (the
-    /// per-message path; the drain coalesces a run through `scroll_tick`).
-    fn apply_scroll(&mut self, pane: u64, delta: i32) {
-        self.scroll_tick(pane, delta);
-        self.broadcast_pane(pane);
-    }
-
     /// Route a client's pane-rect mouse event (brief Locked 2, US1/US2/US3).
     /// An app that negotiated SGR mouse reporting owns its mouse: the event is
     /// SGR-encoded onto its PTY and the mux consumes nothing (AC3-HP) - except
@@ -8295,9 +8221,13 @@ impl Core {
                     return;
                 }
                 let forward = match event.kind {
-                    MouseKind::WheelUp | MouseKind::WheelDown => {
-                        wheel_gate(&mut self.wheel_gate, pane, event.kind, Instant::now())
-                    }
+                    MouseKind::WheelUp | MouseKind::WheelDown => wheel_gate(
+                        &mut self.wheel_gate,
+                        pane,
+                        event.kind,
+                        Instant::now(),
+                        self.wheel_passthrough_rate,
+                    ),
                     _ => true,
                 };
                 if forward {
@@ -10642,6 +10572,11 @@ impl Core {
             //, the same shared-state mutation as BlockNav; a read-only
             // observer must never jump everyone's viewport.
             | CoreMsg::Search { id, .. }
+            // PaneScroll/PaneScrollEdge move the shared scroll for every
+            // co-viewer, the same shared-state mutation as BlockNav; a
+            // read-only observer must never move anyone's viewport.
+            | CoreMsg::PaneScroll { id, .. }
+            | CoreMsg::PaneScrollEdge { id, .. }
             // PaneAnswer injects a keystroke into a pane PTY; a
             // read-only observer must never reach it (same class as Input).
             | CoreMsg::PaneAnswer { id, .. }
@@ -10751,6 +10686,14 @@ impl Core {
             }
             CoreMsg::Search { id, pane, op } => {
                 self.search_nav(id, pane, op);
+                Flow::Continue
+            }
+            CoreMsg::PaneScroll { id, pane, delta } => {
+                self.pane_scroll(id, pane, delta);
+                Flow::Continue
+            }
+            CoreMsg::PaneScrollEdge { id, pane, top } => {
+                self.pane_scroll_edge(id, pane, top);
                 Flow::Continue
             }
             CoreMsg::PaneAnswer {
