@@ -268,6 +268,11 @@ enum Role {
     /// hand-off. The carried tail runs `fno-agents org-remote`; a target
     /// without `@` forwards byte-verbatim to the local command.
     RemoteOrg(Vec<OsString>),
+    /// `fno agents spawn --name <name>@<host> ...`: the cross-host spawn
+    /// relay. The carried tail runs `fno-agents spawn-remote`; an argv with
+    /// no `@` in any fno-owned `--name` value forwards byte-verbatim to the
+    /// local command, and words after a `--` fence are never scanned.
+    RemoteSpawn(Vec<OsString>),
     /// `fno agents mail reply ...`: the native reply leaf. The carried tail
     /// passes through byte-verbatim, re-spelled by the exec action; the
     /// cross-host lane runs inside the leaf, before local routing.
@@ -850,6 +855,11 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
     if let Some(rest) = fno::remote_target::classify_org(args) {
         return Role::RemoteOrg(rest);
     }
+    // The cross-host spawn relay: the claim reads only the fno-owned words
+    // before a `--` fence, so harness flags after it ride byte-verbatim.
+    if let Some(rest) = fno::remote_target::classify_spawn(args) {
+        return Role::RemoteSpawn(rest);
+    }
     // The backlog namespace claims itself lexically, like doctor-event: the
     // sibling dispatcher owns the whole namespace's spelling (grouped and
     // legacy), and anything it does not own yet it forwards to Python
@@ -1227,6 +1237,11 @@ fn main() {
         Role::RemoteOrg(rest) => std::process::exit(fno_agents_exec(
             "fno agents org promote <name>@<host> --scope <scope>",
             &["org-remote"],
+            &rest,
+        )),
+        Role::RemoteSpawn(rest) => std::process::exit(fno_agents_exec(
+            "fno agents spawn --name <name>@<host>",
+            &["spawn-remote"],
             &rest,
         )),
         Role::MailHold(rest) => std::process::exit(fno_agents_exec(

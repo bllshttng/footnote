@@ -102,7 +102,7 @@ fn local_live_row_names(token: &str) -> bool {
 /// command's refusal (exit 16) stays the only voice for a name it knows.
 fn cmd_send_bare(target: &str, rest: &[String]) -> i32 {
     if local_live_row_names(target) {
-        return run_pass_through(&local_send_pass_argv(target, rest));
+        return exec_forward(&local_send_pass_argv(target, rest), "fno agents mail", true);
     }
     let bound = match store_path() {
         StorePath::Primary(remote) => {
@@ -114,7 +114,7 @@ fn cmd_send_bare(target: &str, rest: &[String]) -> i32 {
         _ => None,
     };
     let Some(host) = bound else {
-        return run_pass_through(&local_send_pass_argv(target, rest));
+        return exec_forward(&local_send_pass_argv(target, rest), "fno agents mail", true);
     };
     let rewritten = format!("{target}@{host}");
     let mut reentered = vec![rewritten];
@@ -382,7 +382,7 @@ fn cmd_send(args: &[String]) -> i32 {
         for word in &words[1..] {
             argv.push(OsString::from(word));
         }
-        return run_pass_through(&argv);
+        return exec_forward(&argv, "fno agents mail", true);
     }
 
     match store_path() {
@@ -601,7 +601,7 @@ fn cmd_peek(args: &[String]) -> i32 {
         for word in &words[1..] {
             argv.push(OsString::from(word));
         }
-        return run_pass_through(&argv);
+        return exec_forward(&argv, "fno agents mail", true);
     }
     let mut relay_words = vec!["agents".to_string(), "peek".to_string(), name];
     relay_words.extend(words[1..].iter().cloned());
@@ -899,14 +899,18 @@ pub fn run(args: &[String]) -> i32 {
 pub const LOCAL_FORWARD_ENV: &str = "FNO_MAIL_LOCAL_FORWARD";
 
 /// Exec an argv, inherit stdio, return the exit code (same-host forwards).
-fn run_pass_through(argv: &[OsString]) -> i32 {
+/// The relay family's shared same-host forward: exec an argv, inherit stdio,
+/// return the exit code. `mail_env` stamps the mail-only re-entry marker.
+pub fn exec_forward(argv: &[OsString], label: &str, mail_env: bool) -> i32 {
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..]);
-    cmd.env(LOCAL_FORWARD_ENV, "1");
+    if mail_env {
+        cmd.env(LOCAL_FORWARD_ENV, "1");
+    }
     match cmd.status() {
         Ok(status) => status.code().unwrap_or(1),
         Err(e) => {
-            eprintln!("fno agents mail: local forward failed: {e}");
+            eprintln!("{label}: local forward failed: {e}");
             1
         }
     }

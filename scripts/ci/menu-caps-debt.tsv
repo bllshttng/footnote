@@ -10,5 +10,5 @@ backlog	54	retire the legacy flat spellings once their window ends; split the ad
 config	19	nest under typed groups
 do pr	32	nest the pr commands under typed groups
 doctor	20	nest under typed groups
-fno-agents	136	nest the binary commands under typed groups
+fno-agents	137	nest the binary commands under typed groups (spawn-remote joins mail-remote/org-remote)
 mux	21	nest under typed groups
