@@ -1,6 +1,5 @@
-//! The reconcile-status sweep, ported 1:1 from `cli/src/fno/plan/reconcile_status.py`.
-//!
-//! Three tiers over every `*.md` in a plans dir: Tier 1 rewrites drift
+//! The reconcile-status sweep. Three tiers over every `*.md` in a plans dir:
+//! Tier 1 rewrites drift
 //! synonyms, Tier 2 classifies blank/unknown tokens by the linked node's
 //! closed-ness, Tier 3 recomputes a canonical-but-stale status from the node's
 //! derived status (forward-only). Dry-run unless `apply`. The Python sweep's
@@ -30,6 +29,12 @@ const TIER1: &[(&str, &str)] = &[
     ("reviewing", "in_review"),
     ("shipping", "in_review"),
     ("superseded-by-implementation", "superseded"),
+    // Think-brief terminal words. A brief is complete when written, so these
+    // mean `done` whatever the linked node still says - the sweep must never
+    // read a finished brief's own word as drift.
+    ("findings", "done"),
+    ("research", "done"),
+    ("complete", "done"),
 ];
 
 fn front_re() -> &'static Regex {
@@ -97,8 +102,12 @@ pub fn plan_link_id(fields: &Fields) -> Option<String> {
 }
 
 /// Canonical status a drifted `raw` should become, or None to leave it alone.
-/// `signal` is the linked node's closed-ness, evaluated only for Tier 2.
-pub fn target_status(raw: Option<&Value>, signal: bool) -> Option<String> {
+/// `node_status` is the linked node's status when the map knows it; None means
+/// absent evidence (no link, or the link resolves to nothing). Tier 1 runs
+/// before the signal and ignores it. Tier 2 on a LIVE node (a status that is
+/// neither `done` nor `superseded`) returns None: a terminal stamp over a live
+/// doc is how a freshly written brief read dead.
+pub fn target_status(raw: Option<&Value>, node_status: Option<&str>) -> Option<String> {
     let s = norm(raw);
     if is_known(&s) {
         return None; // already canonical - the sweep corrects drift only
@@ -107,7 +116,11 @@ pub fn target_status(raw: Option<&Value>, signal: bool) -> Option<String> {
         return Some((*to).to_string());
     }
     // Tier 2: blank or any unrecognized token.
-    Some(if signal { "done" } else { "superseded" }.to_string())
+    match node_status {
+        Some(st @ ("done" | "superseded")) => Some(st.to_string()),
+        Some(_) => None, // live node: the drift holds, never a terminal guess
+        None => Some("superseded".to_string()), // orphaned link: honest terminal
+    }
 }
 
 /// Return *text* with the frontmatter `status:` scalar set to *new_status*:
@@ -191,7 +204,8 @@ pub struct SweepResult {
     pub superseded: u32,
     /// Already canonical, no frontmatter, unparseable, or locked.
     pub skipped: u32,
-    /// Drift token left alone because no node status was available.
+    /// Drift token left alone: no node status was available, or the node is
+    /// live and a terminal write would be a guess.
     pub stood_down: u32,
     /// (path, old, new) per rewrite.
     pub changes: Vec<(String, String, String)>,
@@ -287,9 +301,23 @@ pub fn sweep(plans_dir: &Path, apply: bool, status_map: &HashMap<String, String>
             res.stood_down += 1;
             continue;
         } else {
-            let signal = plan_link_id(&parsed.fields)
-                .is_some_and(|l| status_map.get(&l).is_some_and(|st| st == "done"));
-            target_status(raw, signal)
+            let link = plan_link_id(&parsed.fields);
+            let node_status = link
+                .as_deref()
+                .and_then(|l| status_map.get(l))
+                .map(String::as_str);
+            // Live node + unknown word: reported apart from `skipped`, which
+            // would read as a healthy idempotent run.
+            let Some(n) = target_status(raw, node_status) else {
+                res.stood_down += 1;
+                res.warnings.push(format!(
+                    "tier2 hold (node {} is {}, status word '{s}' unknown): {name}",
+                    link.as_deref().unwrap_or("?"),
+                    node_status.unwrap_or("?"),
+                ));
+                continue;
+            };
+            Some(n)
         };
         let Some(new) = new else {
             res.skipped += 1;
@@ -456,9 +484,12 @@ mod tests {
             ("reviewing", "in_review"),
             ("shipping", "in_review"),
             ("superseded-by-implementation", "superseded"),
+            ("findings", "done"),
+            ("research", "done"),
+            ("complete", "done"),
         ] {
             assert_eq!(
-                target_status(Some(&Value::Scalar(raw.into())), false),
+                target_status(Some(&Value::Scalar(raw.into())), None),
                 Some(expected.into())
             );
         }
@@ -467,8 +498,59 @@ mod tests {
     #[test]
     fn canonical_status_left_alone() {
         for s in crate::plan_doc::status::known_statuses().iter().copied() {
-            assert_eq!(target_status(Some(&Value::Scalar(s.into())), true), None);
+            assert_eq!(
+                target_status(Some(&Value::Scalar(s.into())), Some("done")),
+                None
+            );
         }
+    }
+
+    /// A finished think brief reads `findings` and its node is still open.
+    /// The word is a Tier 1 synonym, so it rewrites to `done` before the node
+    /// signal is ever consulted.
+    #[test]
+    fn tier1_think_words_rewrite_even_on_a_live_node() {
+        for raw in ["findings", "research", "complete", "FINDINGS"] {
+            assert_eq!(
+                target_status(Some(&Value::Scalar(raw.into())), Some("idea")),
+                Some("done".into())
+            );
+        }
+    }
+
+    /// An unknown word over a LIVE node holds - it never writes a terminal,
+    /// because that is how a fresh think doc read dead.
+    #[test]
+    fn tier2_holds_on_a_live_node() {
+        assert_eq!(
+            target_status(Some(&Value::Scalar("wip".into())), Some("idea")),
+            None
+        );
+        assert_eq!(
+            target_status(Some(&Value::Scalar("wip".into())), Some("in_progress")),
+            None
+        );
+        assert_eq!(
+            target_status(Some(&Value::Scalar("".into())), Some("ready")),
+            None
+        );
+    }
+
+    #[test]
+    fn tier2_terminals_still_write() {
+        assert_eq!(
+            target_status(Some(&Value::Scalar("wip".into())), Some("done")),
+            Some("done".into())
+        );
+        assert_eq!(
+            target_status(Some(&Value::Scalar("wip".into())), Some("superseded")),
+            Some("superseded".into())
+        );
+        // Orphaned link (no node evidence) keeps the honest terminal.
+        assert_eq!(
+            target_status(Some(&Value::Scalar("wip".into())), None),
+            Some("superseded".into())
+        );
     }
 
     // ------------------------------------------------------------------
@@ -631,6 +713,21 @@ mod tests {
         assert!(res.summary().contains("1 stood down"));
         assert_eq!(read_doc(&p), before);
         assert!(res.warnings.iter().any(|w| w.contains("tier2 off")));
+    }
+
+    /// The sweep-level hold: a live node's unknown word is counted, warned,
+    /// and left byte-for-byte alone.
+    #[test]
+    fn sweep_holds_a_live_node_doc() {
+        let dir = tmp_dir("hold");
+        let p = write_doc(&dir, "a.md", &linked_plan("wip", "x-1"));
+        let before = read_doc(&p);
+        let res = sweep(&dir, true, &map(&[("x-1", "in_progress")]));
+        assert_eq!(res.stood_down, 1);
+        assert_eq!(res.skipped, 0);
+        assert_eq!(res.superseded, 0);
+        assert!(res.warnings.iter().any(|w| w.contains("tier2 hold")));
+        assert_eq!(read_doc(&p), before);
     }
 
     fn read_doc(p: &Path) -> String {

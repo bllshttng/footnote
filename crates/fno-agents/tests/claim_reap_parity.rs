@@ -497,13 +497,32 @@ fn the_reap_leaf_matches_the_python_leg_on_every_frozen_case() {
     // 6. A handover suspect answers through the pane probe. FNO_MUX_DIR is
     // pinned to an empty dir OUTSIDE the leg roots, shared by both legs, so
     // both probe the same empty pane list and answer identically. The mux
-    // tempdir outlives the case.
+    // tempdir outlives the case. FNO_BIN pins a stub so the policy consult
+    // never boots the real CLI: a loaded runner could push that python-boot
+    // subprocess past the probe's 10s budget and flip the token to
+    // probe-blocked. The stub answers `worktree policy` fast and prints
+    // nothing for `mux ls`, which parses as unanswered - the golden shape.
     let mux_dir = tempfile::tempdir().unwrap();
     let mux = mux_dir.path().display().to_string();
+    let stub_dir = tempfile::tempdir().unwrap();
+    let stub = stub_dir.path().join("fno");
+    std::fs::write(
+        &stub,
+        "#!/bin/sh\nif [ \"$1\" = mux ]; then exit 0; fi\necho harness-native\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
     case(
         "handover_suspect_pane_probe_unanswered",
         |root| with_root(root, &[]),
-        &[("FNO_MUX_DIR", mux)],
+        &[
+            ("FNO_MUX_DIR", mux),
+            ("FNO_BIN", stub.display().to_string()),
+        ],
         |root| plant_suspect(root, "node:reap-handover", "spawn-handover:worker-1"),
     );
 
